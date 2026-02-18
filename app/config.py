@@ -1,7 +1,20 @@
-import os
-from dotenv import load_dotenv
+from pydantic_settings import BaseSettings
 
-load_dotenv()
+class Settings(BaseSettings):
+    # Mongo
+    MONGO_URI: str
+    DB_NAME: str
 
-MONGO_URI = os.getenv("MONGO_URI")
-DB_NAME = os.getenv("DB_NAME", "ai_doc_system")
+    # Azure LLM
+    AZURE_OPENAI_LLM_KEY: str
+    AZURE_LLM_API_VERSION: str
+    AZURE_LLM_ENDPOINT: str
+    AZURE_LLM_DEPLOYMENT_41_MINI: str
+
+    class Config:
+        env_file = ".env"
+
+settings = Settings()
+
+MONGO_URI = settings.MONGO_URI
+DB_NAME = settings.DB_NAME

@@ -5,23 +5,23 @@ import uuid
 from fastapi.responses import StreamingResponse
 from io import BytesIO
 from fpdf import FPDF
-
 from app.db import get_db
+from app.services.orchestrator_service import OrchestratorService
 
-# -------------------------
+
 # Pydantic model for request
-# -------------------------
+
 class SessionCreateRequest(BaseModel):
     template_id: str
 
-# -------------------------
+
 # Router setup
-# -------------------------
+
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
 
-# -------------------------
+
 # Create a session endpoint
-# -------------------------
+
 @router.post("/")
 def create_session(payload: SessionCreateRequest):
     db = get_db()
@@ -29,17 +29,17 @@ def create_session(payload: SessionCreateRequest):
     # Get template ID from request
     template_id = payload.template_id
 
-    # 1️⃣ Fetch template by Mongo _id
+    # 1 Fetch template by Mongo _id
     template = db.document_templates.find_one({"_id": template_id})
 
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
 
-    # 2️⃣ Count sections
+    # 2 Count sections
     sections = template["template_json"]["sections"]
     total_sections = len(sections)
 
-    # 3️⃣ Create session record
+    # 3 Create session record
     session_id = f"sess_{uuid.uuid4().hex[:8]}"
 
     session_doc = {
@@ -54,7 +54,7 @@ def create_session(payload: SessionCreateRequest):
 
     db.doc_sessions.insert_one(session_doc)
 
-    # 4️⃣ Return response
+    # 4 Return response
     return {
         "session_id": session_id,
         "total_sections": total_sections,
@@ -64,25 +64,25 @@ def create_session(payload: SessionCreateRequest):
 def get_current_section(session_id: str):
     db = get_db()
 
-    # 1️⃣ Fetch session
+    # 1 Fetch session
     session = db.doc_sessions.find_one({"_id": session_id})
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # 2️⃣ Fetch associated template
+    # 2 Fetch associated template
     template = db.document_templates.find_one({"_id": session["template_id"]})
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
 
-    # 3️⃣ Get current section index
+    # 3 Get current section index
     current_index = session.get("current_section_index", 0)
     sections = template["template_json"]["sections"]
 
-    # 4️⃣ If all sections are completed
+    # 4 If all sections are completed
     if current_index >= len(sections):
         return {"message": "All sections completed"}
 
-    # 5️⃣ Return the current section metadata
+    # 5 Return the current section metadata
     current_section = sections[current_index]
 
     return current_section
@@ -96,12 +96,12 @@ class SectionQuestionRequest(BaseModel):
 def add_section_questions(session_id: str, payload: SectionQuestionRequest):
     db = get_db()
 
-    # 1️⃣ Fetch session
+    # 1 Fetch session
     session = db.doc_sessions.find_one({"_id": session_id})
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # 2️⃣ Prepare question document
+    # 2 Prepare question document
     question_doc = {
         "_id": f"q_{uuid.uuid4().hex[:8]}",
         "session_id": session_id,
@@ -114,7 +114,7 @@ def add_section_questions(session_id: str, payload: SectionQuestionRequest):
         "updated_at": datetime.utcnow()
     }
 
-    # 3️⃣ Insert into session_questions collection
+    # 3 Insert into session_questions collection
     db.session_questions.insert_one(question_doc)
 
     return {
@@ -129,34 +129,34 @@ class GenerateSectionRequest(BaseModel):
 def generate_section(session_id: str, payload: GenerateSectionRequest):
     db = get_db()
 
-    # 1️⃣ Fetch session
+    # 1 Fetch session
     session = db.doc_sessions.find_one({"_id": session_id})
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # 2️⃣ Fetch template
+    # 2 Fetch template
     template = db.document_templates.find_one({"_id": session["template_id"]})
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
 
-    # 3️⃣ Fetch section metadata
+    # 3 Fetch section metadata
     sections = template["template_json"]["sections"]
     section = next((s for s in sections if s["id"] == payload.section_id), None)
     if not section:
         raise HTTPException(status_code=404, detail="Section not found in template")
 
-    # 4️⃣ Fetch user answers
+    # 4 Fetch user answers
     qa_doc = db.session_questions.find_one({
         "session_id": session_id,
         "section_id": payload.section_id
     })
     answers = qa_doc.get("answers", []) if qa_doc else []
 
-    # 5️⃣ Generate content (placeholder)
+    # 5 Generate content (placeholder)
     # Here you would call your AI generator using `section` and `answers`
     generated_content = f"Generated content for section '{payload.section_id}' using answers: {answers}"
 
-    # 6️⃣ Save to doc_sections
+    # 6 Save to doc_sections
     section_doc = {
         "_id": f"sec_{uuid.uuid4().hex[:8]}",
         "session_id": session_id,
@@ -184,12 +184,12 @@ class ApproveSectionRequest(BaseModel):
 def approve_section(session_id: str, payload: ApproveSectionRequest):
     db = get_db()
 
-    # 1️⃣ Fetch session
+    # 1 Fetch session
     session = db.doc_sessions.find_one({"_id": session_id})
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # 2️⃣ Check section exists and is generated
+    # 2 Check section exists and is generated
     section_doc = db.doc_sections.find_one({
         "session_id": session_id,
         "section_id": payload.section_id,
@@ -198,13 +198,13 @@ def approve_section(session_id: str, payload: ApproveSectionRequest):
     if not section_doc:
         raise HTTPException(status_code=404, detail="Section not generated yet")
 
-    # 3️⃣ Mark section as approved
+    # 3 Mark section as approved
     db.doc_sections.update_one(
         {"_id": section_doc["_id"]},
         {"$set": {"status": "approved"}}
     )
 
-    # 4️⃣ Increment current_section_index in session
+    # 4 Increment current_section_index in session
     new_index = session["current_section_index"] + 1
     db.doc_sessions.update_one(
         {"_id": session_id},
@@ -223,13 +223,13 @@ def compile_document(session_id: str):
 
 
 
-    # 1️⃣ Fetch session
+    # 1 Fetch session
     session = db.doc_sessions.find_one({"_id": session_id})
     print("DEBUG: session fetched:", session)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # 2️⃣ Fetch template sections
+    # 2 Fetch template sections
     template = db.document_templates.find_one({"_id": session["template_id"]})
     print("DEBUG: template fetched:", template)
     if not template:
@@ -237,7 +237,7 @@ def compile_document(session_id: str):
 
     sections = template["template_json"]["sections"]
 
-    # 3️⃣ Fetch all approved sections for this session
+    # 3 Fetch all approved sections for this session
     compiled_sections = []
     print("DEBUG: sections in template:", [sec["id"] for sec in sections])
     for sec in sections:
@@ -250,10 +250,10 @@ def compile_document(session_id: str):
             raise HTTPException(status_code=400, detail=f"Section '{sec['id']}' not approved yet")
         compiled_sections.append(sec_doc["content"])
 
-    # 4️⃣ Merge content
+    # 4 Merge content
     final_content = "\n\n".join(compiled_sections)
 
-    # 5️⃣ Save to generated_documents
+    # 5 Save to generated_documents
     final_doc = {
         "_id": f"doc_{uuid.uuid4().hex[:8]}",
         "session_id": session_id,
@@ -277,7 +277,7 @@ class PublishRequest(BaseModel):
 def download_pdf(session_id: str):
     db = get_db()
 
-    # 1️⃣ Fetch compiled document
+    # 1 Fetch compiled document
     compiled_doc = db.generated_documents.find_one({"session_id": session_id})
     if not compiled_doc:
         raise HTTPException(status_code=404, detail="Compiled document not found")
@@ -286,7 +286,7 @@ def download_pdf(session_id: str):
     if not content.strip():
         raise HTTPException(status_code=400, detail="Compiled document is empty")
 
-    # 2️⃣ Create PDF
+    # 2 Create PDF
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -298,14 +298,15 @@ def download_pdf(session_id: str):
     for line in content.split("\n"):
         pdf.multi_cell(0, 8, line)
 
-    # 3️⃣ Save to BytesIO
+    # 3 Save to BytesIO
     pdf_output = BytesIO()
     pdf.output(pdf_output)
     pdf_output.seek(0)
 
-    # 4️⃣ Return PDF response
+    # 4 Return PDF response
     return StreamingResponse(
         pdf_output,
         media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename=document_{session_id}.pdf"}
     )
+
