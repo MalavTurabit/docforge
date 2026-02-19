@@ -1,312 +1,405 @@
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from datetime import datetime
 import uuid
-from fastapi.responses import StreamingResponse
+from datetime import datetime
 from io import BytesIO
+
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from fpdf import FPDF
+from pydantic import BaseModel
+
 from app.db import get_db
 from app.services.orchestrator_service import OrchestratorService
 
+router = APIRouter(prefix="/sessions", tags=["Sessions"])
 
-# Pydantic model for request
+
+# ──────────────────────────────────────────────
+# REQUEST / RESPONSE MODELS
+# ──────────────────────────────────────────────
 
 class SessionCreateRequest(BaseModel):
     template_id: str
 
 
-# Router setup
+class GenerateQuestionsRequest(BaseModel):
+    section_id: str  # the section we want questions for
 
-router = APIRouter(prefix="/sessions", tags=["Sessions"])
+
+class AnswerItem(BaseModel):
+    question_id: str
+    answer: str
 
 
-# Create a session endpoint
+class SubmitAnswersRequest(BaseModel):
+    section_id: str
+    answers: list[AnswerItem]
+
+
+class GenerateSectionRequest(BaseModel):
+    section_id: str
+
+
+class ApproveSectionRequest(BaseModel):
+    section_id: str
+    edited_content: str | None = None  # optional manual edit before approval
+
+
+# ──────────────────────────────────────────────
+# 1. CREATE SESSION
+# ──────────────────────────────────────────────
 
 @router.post("/")
 def create_session(payload: SessionCreateRequest):
     db = get_db()
 
-    # Get template ID from request
-    template_id = payload.template_id
-
-    # 1 Fetch template by Mongo _id
-    template = db.document_templates.find_one({"_id": template_id})
-
+    template = db.document_templates.find_one({"_id": payload.template_id})
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
 
-    # 2 Count sections
     sections = template["template_json"]["sections"]
     total_sections = len(sections)
 
-    # 3 Create session record
     session_id = f"sess_{uuid.uuid4().hex[:8]}"
-
     session_doc = {
         "_id": session_id,
-        "template_id": template_id,
+        "template_id": payload.template_id,
         "dept_id": template["dept_id"],
         "status": "in_progress",
         "current_section_index": 0,
         "total_sections": total_sections,
-        "created_at": datetime.utcnow()
+        "created_at": datetime.utcnow(),
     }
-
     db.doc_sessions.insert_one(session_doc)
 
-    # 4 Return response
     return {
         "session_id": session_id,
         "total_sections": total_sections,
-        "message": "Session created successfully"
+        "message": "Session created successfully",
     }
+
+
+# ──────────────────────────────────────────────
+# 2. GET CURRENT SECTION METADATA
+# ──────────────────────────────────────────────
+
 @router.get("/{session_id}/current_section")
 def get_current_section(session_id: str):
     db = get_db()
 
-    # 1 Fetch session
     session = db.doc_sessions.find_one({"_id": session_id})
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # 2 Fetch associated template
     template = db.document_templates.find_one({"_id": session["template_id"]})
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
 
-    # 3 Get current section index
     current_index = session.get("current_section_index", 0)
     sections = template["template_json"]["sections"]
 
-    # 4 If all sections are completed
     if current_index >= len(sections):
-        return {"message": "All sections completed"}
-
-    # 5 Return the current section metadata
-    current_section = sections[current_index]
-
-    return current_section
-
-class SectionQuestionRequest(BaseModel):
-    section_id: str
-    questions: list[str]        # AI-generated questions
-    answers: list[str]          # User answers (in same order as questions)
-
-@router.post("/{session_id}/questions")
-def add_section_questions(session_id: str, payload: SectionQuestionRequest):
-    db = get_db()
-
-    # 1 Fetch session
-    session = db.doc_sessions.find_one({"_id": session_id})
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    # 2 Prepare question document
-    question_doc = {
-        "_id": f"q_{uuid.uuid4().hex[:8]}",
-        "session_id": session_id,
-        "dept_id": session["dept_id"],
-        "template_id": session["template_id"],
-        "section_id": payload.section_id,
-        "questions": payload.questions,
-        "answers": payload.answers,
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow()
-    }
-
-    # 3 Insert into session_questions collection
-    db.session_questions.insert_one(question_doc)
+        return {
+            "all_sections_done": True,
+            "message": "All sections completed. Ready to compile.",
+        }
 
     return {
-        "message": "Questions and answers saved successfully",
-        "question_doc_id": question_doc["_id"]
+        "all_sections_done": False,
+        "current_index": current_index,
+        "total_sections": len(sections),
+        "section": sections[current_index],
     }
 
-class GenerateSectionRequest(BaseModel):
-    section_id: str
 
-@router.post("/{session_id}/generate_section")
-def generate_section(session_id: str, payload: GenerateSectionRequest):
+# ──────────────────────────────────────────────
+# 3. GENERATE QUESTIONS FOR CURRENT SECTION
+#    (LLM call via orchestrator)
+# ──────────────────────────────────────────────
+
+@router.post("/{session_id}/generate_questions")
+async def generate_questions(session_id: str, payload: GenerateQuestionsRequest):
     db = get_db()
 
-    # 1 Fetch session
     session = db.doc_sessions.find_one({"_id": session_id})
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # 2 Fetch template
     template = db.document_templates.find_one({"_id": session["template_id"]})
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
 
-    # 3 Fetch section metadata
     sections = template["template_json"]["sections"]
-    section = next((s for s in sections if s["id"] == payload.section_id), None)
-    if not section:
+    section_json = next(
+        (s for s in sections if s["id"] == payload.section_id), None
+    )
+    if not section_json:
         raise HTTPException(status_code=404, detail="Section not found in template")
 
-    # 4 Fetch user answers
-    qa_doc = db.session_questions.find_one({
-        "session_id": session_id,
-        "section_id": payload.section_id
-    })
-    answers = qa_doc.get("answers", []) if qa_doc else []
+    orchestrator = OrchestratorService()
+    result = await orchestrator.generate_questions_for_section(session_id, section_json)
 
-    # 5 Generate content (placeholder)
-    # Here you would call your AI generator using `section` and `answers`
-    generated_content = f"Generated content for section '{payload.section_id}' using answers: {answers}"
+    if result.get("status") == "error":
+        raise HTTPException(status_code=400, detail=result["detail"])
 
-    # 6 Save to doc_sections
-    section_doc = {
-        "_id": f"sec_{uuid.uuid4().hex[:8]}",
-        "session_id": session_id,
-        "section_id": payload.section_id,
-        "section_title": section["title"],
-        "version": 1,
-        "content": generated_content,
-        "status": "generated",
-        "created_at": datetime.utcnow()
-    }
-    db.doc_sections.insert_one(section_doc)
+    return result
 
-    return {
-        "message": f"Section '{payload.section_id}' generated successfully",
-        "section_doc_id": section_doc["_id"],
-        "content_preview": generated_content[:200]  # first 200 chars
-    }
 
-from pydantic import BaseModel
+# ──────────────────────────────────────────────
+# 4. SUBMIT ANSWERS FOR A SECTION
+# ──────────────────────────────────────────────
 
-class ApproveSectionRequest(BaseModel):
-    section_id: str
+@router.post("/{session_id}/submit_answers")
+def submit_answers(session_id: str, payload: SubmitAnswersRequest):
+    db = get_db()
+
+    session = db.doc_sessions.find_one({"_id": session_id})
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    orchestrator = OrchestratorService()
+    result = orchestrator.save_answers(
+        session_id,
+        payload.section_id,
+        [a.dict() for a in payload.answers],
+    )
+
+    if result.get("status") == "error":
+        raise HTTPException(status_code=400, detail=result["detail"])
+
+    return result
+
+
+# ──────────────────────────────────────────────
+# 5. GENERATE SECTION CONTENT (LLM writes section)
+# ──────────────────────────────────────────────
+
+@router.post("/{session_id}/generate_section")
+async def generate_section(session_id: str, payload: GenerateSectionRequest):
+    db = get_db()
+
+    session = db.doc_sessions.find_one({"_id": session_id})
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    template = db.document_templates.find_one({"_id": session["template_id"]})
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    sections = template["template_json"]["sections"]
+    section_json = next(
+        (s for s in sections if s["id"] == payload.section_id), None
+    )
+    if not section_json:
+        raise HTTPException(status_code=404, detail="Section not found in template")
+
+    orchestrator = OrchestratorService()
+    result = await orchestrator.generate_section_content(
+        session_id, section_json, template["template_json"]
+    )
+
+    if result.get("status") == "error":
+        raise HTTPException(status_code=400, detail=result["detail"])
+
+    if result.get("status") == "waiting_for_answers":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unanswered required questions: {result.get('unanswered_question_ids')}",
+        )
+
+    return result
+
+
+# ──────────────────────────────────────────────
+# 6. APPROVE SECTION (with optional manual edit)
+# ──────────────────────────────────────────────
 
 @router.post("/{session_id}/approve_section")
 def approve_section(session_id: str, payload: ApproveSectionRequest):
     db = get_db()
 
-    # 1 Fetch session
     session = db.doc_sessions.find_one({"_id": session_id})
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # 2 Check section exists and is generated
-    section_doc = db.doc_sections.find_one({
-        "session_id": session_id,
-        "section_id": payload.section_id,
-        "status": "generated"
-    })
-    if not section_doc:
-        raise HTTPException(status_code=404, detail="Section not generated yet")
-
-    # 3 Mark section as approved
-    db.doc_sections.update_one(
-        {"_id": section_doc["_id"]},
-        {"$set": {"status": "approved"}}
+    orchestrator = OrchestratorService()
+    result = orchestrator.approve_section(
+        session_id, payload.section_id, payload.edited_content
     )
 
-    # 4 Increment current_section_index in session
-    new_index = session["current_section_index"] + 1
-    db.doc_sessions.update_one(
-        {"_id": session_id},
-        {"$set": {"current_section_index": new_index}}
+    if result.get("status") == "error":
+        raise HTTPException(status_code=400, detail=result["detail"])
+
+    return result
+
+
+# ──────────────────────────────────────────────
+# 7. GET ALL GENERATED SECTIONS (for final review)
+# ──────────────────────────────────────────────
+
+@router.get("/{session_id}/sections")
+def get_all_sections(session_id: str):
+    db = get_db()
+
+    session = db.doc_sessions.find_one({"_id": session_id})
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    sections = list(
+        db.doc_sections.find(
+            {"session_id": session_id},
+            {"_id": 1, "section_id": 1, "section_title": 1, "content": 1, "status": 1},
+        )
     )
 
-    return {
-        "message": f"Section '{payload.section_id}' approved",
-        "next_section_index": new_index
-    }
+    return {"session_id": session_id, "sections": sections}
+
+
+# ──────────────────────────────────────────────
+# 8. COMPILE FINAL DOCUMENT
+# ──────────────────────────────────────────────
 
 @router.post("/{session_id}/compile")
 def compile_document(session_id: str):
     db = get_db()
-    print("DEBUG: session_id received from URL:", session_id)
 
-
-
-    # 1 Fetch session
     session = db.doc_sessions.find_one({"_id": session_id})
-    print("DEBUG: session fetched:", session)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # 2 Fetch template sections
     template = db.document_templates.find_one({"_id": session["template_id"]})
-    print("DEBUG: template fetched:", template)
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
 
     sections = template["template_json"]["sections"]
 
-    # 3 Fetch all approved sections for this session
     compiled_sections = []
-    print("DEBUG: sections in template:", [sec["id"] for sec in sections])
     for sec in sections:
-        sec_doc = db.doc_sections.find_one({
-            "session_id": session_id,
-            "section_id": sec["id"],
-            "status": "approved"
-        })
+        sec_doc = db.doc_sections.find_one(
+            {
+                "session_id": session_id,
+                "section_id": sec["id"],
+                "status": "approved",
+            }
+        )
         if not sec_doc:
-            raise HTTPException(status_code=400, detail=f"Section '{sec['id']}' not approved yet")
-        compiled_sections.append(sec_doc["content"])
+            raise HTTPException(
+                status_code=400,
+                detail=f"Section '{sec['id']}' is not approved yet.",
+            )
+        compiled_sections.append(
+            f"## {sec_doc['section_title']}\n\n{sec_doc['content']}"
+        )
 
-    # 4 Merge content
-    final_content = "\n\n".join(compiled_sections)
+    final_content = "\n\n---\n\n".join(compiled_sections)
 
-    # 5 Save to generated_documents
-    final_doc = {
-        "_id": f"doc_{uuid.uuid4().hex[:8]}",
-        "session_id": session_id,
-        "compiled_content": final_content,
-        "created_at": datetime.utcnow()
-    }
-    db.generated_documents.insert_one(final_doc)
-    
+    # Upsert compiled doc (allow recompilation)
+    existing_doc = db.generated_documents.find_one({"session_id": session_id})
+    if existing_doc:
+        db.generated_documents.update_one(
+            {"_id": existing_doc["_id"]},
+            {"$set": {"compiled_content": final_content, "updated_at": datetime.utcnow()}},
+        )
+        document_id = existing_doc["_id"]
+    else:
+        document_id = f"doc_{uuid.uuid4().hex[:8]}"
+        db.generated_documents.insert_one(
+            {
+                "_id": document_id,
+                "session_id": session_id,
+                "compiled_content": final_content,
+                "created_at": datetime.utcnow(),
+            }
+        )
+
+    db.doc_sessions.update_one(
+        {"_id": session_id}, {"$set": {"status": "compiled"}}
+    )
+
     return {
         "message": "Document compiled successfully",
-        "document_id": final_doc["_id"]
+        "document_id": document_id,
     }
 
-from pydantic import BaseModel
 
-class PublishRequest(BaseModel):
-    notion_database_id: str  # Target Notion database
-    title_field: str = "title"  # Which field in Notion to set title
+# ──────────────────────────────────────────────
+# 9. DOWNLOAD PDF
+# ──────────────────────────────────────────────
 
 @router.get("/{session_id}/download_pdf")
 def download_pdf(session_id: str):
     db = get_db()
 
-    # 1 Fetch compiled document
     compiled_doc = db.generated_documents.find_one({"session_id": session_id})
     if not compiled_doc:
-        raise HTTPException(status_code=404, detail="Compiled document not found")
+        raise HTTPException(status_code=404, detail="Compiled document not found. Run /compile first.")
 
     content = compiled_doc.get("compiled_content", "")
     if not content.strip():
         raise HTTPException(status_code=400, detail="Compiled document is empty")
 
-    # 2 Create PDF
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
-    
-    # Use UTF-8 capable font
-    pdf.add_font('DejaVu', '', 'DejaVuSans.ttf', uni=True)
+    pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
     pdf.set_font("DejaVu", size=12)
-    
+
     for line in content.split("\n"):
         pdf.multi_cell(0, 8, line)
 
-    # 3 Save to BytesIO
     pdf_output = BytesIO()
     pdf.output(pdf_output)
     pdf_output.seek(0)
 
-    # 4 Return PDF response
     return StreamingResponse(
         pdf_output,
         media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename=document_{session_id}.pdf"}
+        headers={
+            "Content-Disposition": f"attachment; filename=document_{session_id}.pdf"
+        },
     )
 
+
+# ──────────────────────────────────────────────
+# 10. PUBLISH TO NOTION
+# ──────────────────────────────────────────────
+
+class PublishToNotionRequest(BaseModel):
+    notion_database_id: str
+    doc_title: str = "Generated Document"
+
+
+@router.post("/{session_id}/publish_notion")
+async def publish_to_notion(session_id: str, payload: PublishToNotionRequest):
+    db = get_db()
+
+    compiled_doc = db.generated_documents.find_one({"session_id": session_id})
+    if not compiled_doc:
+        raise HTTPException(status_code=404, detail="Compiled document not found. Run /compile first.")
+
+    content = compiled_doc.get("compiled_content", "")
+    if not content.strip():
+        raise HTTPException(status_code=400, detail="Compiled document is empty")
+
+    # Notion publish is handled via the MCP connector available in this environment.
+    # We create a page under the given database with the compiled markdown content.
+    # The actual MCP call is made by the Notion tool injected at the platform level.
+    # Here we record the intent and return success — the Streamlit frontend
+    # triggers the Notion MCP tool directly using the session content.
+
+    db.generated_documents.update_one(
+        {"_id": compiled_doc["_id"]},
+        {
+            "$set": {
+                "notion_database_id": payload.notion_database_id,
+                "notion_publish_requested": True,
+                "updated_at": datetime.utcnow(),
+            }
+        },
+    )
+
+    return {
+        "message": "Notion publish request recorded. Use the Streamlit frontend to push via Notion MCP.",
+        "session_id": session_id,
+        "notion_database_id": payload.notion_database_id,
+        "content_length": len(content),
+    }

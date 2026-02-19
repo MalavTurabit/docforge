@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from app.routes.departments import router as dept_router
 from app.routes.templates import router as templates_router
 from app.routes.sessions import router as sessions_router
-from app.routes.session_routes import router as session_router
+from app.routes.sessions import router as session_router
 
 
 
