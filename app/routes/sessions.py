@@ -380,11 +380,7 @@ async def publish_to_notion(session_id: str, payload: PublishToNotionRequest):
     if not content.strip():
         raise HTTPException(status_code=400, detail="Compiled document is empty")
 
-    # Notion publish is handled via the MCP connector available in this environment.
-    # We create a page under the given database with the compiled markdown content.
-    # The actual MCP call is made by the Notion tool injected at the platform level.
-    # Here we record the intent and return success — the Streamlit frontend
-    # triggers the Notion MCP tool directly using the session content.
+    # Notiob mcp need to implemnt latter on  
 
     db.generated_documents.update_one(
         {"_id": compiled_doc["_id"]},
