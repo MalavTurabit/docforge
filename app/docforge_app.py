@@ -131,9 +131,9 @@ section[data-testid="stSidebar"] > div:first-child {
 .sb-wrap { display: flex; flex-direction: column; min-height: 100vh; padding-bottom: 1rem; }
 
 .sb-brand {
-    padding: 1.2rem 1.1rem 1rem;
+    padding: 1.8rem 1.1rem 1rem;
     border-bottom: 1px solid rgba(255,255,255,0.07);
-    font-size: 1rem; font-weight: 700; color: #f9fafb;
+    font-size: 1.2rem; font-weight: 700; color: #f9fafb;
     letter-spacing: -0.02em;
 }
 .sb-brand .ac { color: #818cf8; }
@@ -271,9 +271,9 @@ DEPT_DISPLAY = {
     "dept_marketing":           ("📣","Marketing"),
     "dept_sales":               ("📈","Sales"),
     "dept_business_operations": ("🏢","Business Ops"),
-    "dept_legal":               ("⚖️","Legal & Compliance"),
-    "dept_it":                  ("🖥️","IT & Security"),
-    "dept_sales_marketing":     ("📊","Sales & Marketing"),
+    "dept_legal__compliance":   ("⚖️","Legal & Compliance"),
+    "dept_it__security":         ("🖥️","IT & Security"),
+    "dept_sales__marketing":     ("📊","Sales & Marketing"),
 }
 def dept_display(dept_id, raw_name=""):
     if dept_id in DEPT_DISPLAY: return DEPT_DISPLAY[dept_id]
