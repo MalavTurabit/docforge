@@ -1,41 +1,19 @@
 import json
 import re
-
 from app.services.llm_provider import LLMProvider
 
 
-def extract_questions_from_llm(raw_text: str) -> list[str]:
-    """
-    Robustly pull the questions list out of the LLM response even if it
-    wraps the JSON in markdown fences or adds commentary.
-    """
+def extract_questions_from_llm(raw_text: str):
     try:
-        # Strip markdown code fences if present
-        cleaned = re.sub(r"```(?:json)?", "", raw_text).strip()
-
-        # Find the first JSON object in the response
-        match = re.search(r"\{.*\}", cleaned, re.S)
+        match = re.search(r'\{.*\}', raw_text, re.S)
         if not match:
-            print("[QuestionService] No JSON object found in LLM response")
+            print("No JSON found in LLM response")
             return []
-
-        data = json.loads(match.group())
-        questions = data.get("questions", [])
-
-        # Normalise: handle both list-of-strings and list-of-dicts
-        result = []
-        for q in questions:
-            if isinstance(q, str):
-                result.append(q.strip())
-            elif isinstance(q, dict):
-                text = q.get("question_text") or q.get("text") or q.get("question") or ""
-                if text:
-                    result.append(text.strip())
-
-        return result
-
+        json_str = match.group()
+        data = json.loads(json_str)
+        return data.get("questions", [])
     except Exception as e:
-        print(f"[QuestionService] JSON parse error: {e}")
+        print("JSON parsing error:", e)
         return []
 
 
@@ -43,35 +21,49 @@ class QuestionService:
     def __init__(self):
         self.llm = LLMProvider()
 
-    async def generate_questions(self, section_json: dict) -> list[str]:
-        """
-        Generate 5-7 targeted questions for the given section.
-        Returns a plain list of question strings.
-        """
-        prompt = f"""You are an expert document architect. Your job is to generate targeted questions that, when answered, will give an AI everything it needs to write a specific document section accurately and completely.
+    async def generate_questions(self, section_json: dict, company_context: dict = None) -> list:
 
-SECTION METADATA:
+        # Build context block from what we already know
+        known_info = ""
+        if company_context:
+            known_info = f"""
+ALREADY KNOWN — DO NOT ask about any of these:
+- Company name: {company_context.get('company_name', '')}
+- Product name: {company_context.get('product_name', '')}
+- Product description: {company_context.get('product_description', '')}
+- Industry: {company_context.get('industry_vertical', '')}
+- Company stage: {company_context.get('company_stage', '')}
+- Target customer: {company_context.get('target_customer', '')}
+- Key problem solved: {company_context.get('key_problem_solved', '')}
+"""
+
+        prompt = f"""You are helping draft one section of a business document. Your job is to ask the user ONLY what you need to write this section well.
+
+SECTION TO DRAFT:
 {json.dumps(section_json, indent=2)}
+{known_info}
+RULES:
+1. Read the section title and prompt_hint carefully to understand what this section is ABOUT
+2. Ask ONLY about content that belongs in THIS section of THIS document
+   - "Candidate Details" in an offer letter → ask about the candidate's name, role, start date, location — NOT about technology, systems, or products
+   - "Compensation" in an offer letter → ask about salary, bonuses, equity, pay frequency
+   - "Scope of Work" in a contract → ask about deliverables, timelines, exclusions
+3. NEVER ask about the company product, technology stack, or business model — that is already known above
+4. NEVER ask generic questions like "are there any compliance requirements" or "what format should be used"
+5. If the section likely needs a TABLE (e.g. compensation breakdown, fee schedule, pricing), ask for the specific numbers/rows needed for that table
+6. Ask the MINIMUM questions needed — aim for 2-3, max 5 only if the section is genuinely complex
+7. Each question must be direct and specific — answerable in 1-3 sentences
 
-Generate 5 to 7 questions that:
-- Are specific to this section's purpose and prompt_hint
-- Surface the exact content, data, or decisions needed to draft this section
-- Focus on information NOT already present in the metadata
-- Are answerable by a human domain expert or stakeholder
-- Avoid generic or structural questions
-
-Return ONLY valid JSON with no extra commentary:
+Return ONLY this JSON:
 {{
   "questions": [
-    "Question 1 text here",
-    "Question 2 text here"
+    {{"question_id": "q1", "question_text": "..."}},
+    {{"question_id": "q2", "question_text": "..."}}
   ]
-}}
-"""
+}}"""
+
         response = await self.llm.generate(prompt)
-        print("[QuestionService] LLM raw response:", response)
-
+        print("LLM RAW RESPONSE:", response)
         questions = extract_questions_from_llm(response)
-        print("[QuestionService] Extracted questions:", questions)
-
+        print("EXTRACTED QUESTIONS:", questions)
         return questions
