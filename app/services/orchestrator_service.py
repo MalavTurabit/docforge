@@ -13,7 +13,7 @@ class OrchestratorService:
     State machine per section:
         no questions doc  →  generate questions  →  return  (frontend shows Q form)
         questions exist, answers incomplete  →  waiting_for_answers
-        answers complete, no section doc  →  generate section content  →  return
+        answers complete  →  generate section content  →  return
         section generated  →  waiting_for_approval (user edits / approves)
     """
 
@@ -22,11 +22,14 @@ class OrchestratorService:
         self.question_service = QuestionService()
         self.section_service = SectionService()
 
-    # ------------------------------------------------------------------
-    # STEP 1 – Generate questions for a section (called on section start)
-    # ------------------------------------------------------------------
+
+    # STEP 1 – Generate questions for a section
+
     async def generate_questions_for_section(
-        self, session_id: str, section_json: dict
+        self,
+        session_id: str,
+        section_json: dict,
+        company_context: dict | None = None,
     ) -> dict:
         session = self.db.doc_sessions.find_one({"_id": session_id})
         if not session:
@@ -45,9 +48,10 @@ class OrchestratorService:
                 "question_doc_id": existing["_id"],
             }
 
-        # Call LLM to generate questions
+        # Call LLM — pass company_context so questions are company-specific
         raw_questions: list[str] = await self.question_service.generate_questions(
-            section_json
+            section_json,
+            company_context=company_context,
         )
 
         # Build structured question list matching session_questions schema
@@ -71,6 +75,7 @@ class OrchestratorService:
             "section_title": section_json.get("title", section_id),
             "generation_round": 1,
             "questions": structured_questions,
+            "company_context": company_context or {},
             "status": "questions_generated",
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow(),
@@ -84,22 +89,21 @@ class OrchestratorService:
             "question_doc_id": doc["_id"],
         }
 
-    # ------------------------------------------------------------------
+
     # STEP 2 – Save user answers (upsert into the questions doc)
-    # ------------------------------------------------------------------
+
     def save_answers(
         self, session_id: str, section_id: str, answers: list[dict]
     ) -> dict:
         """
-        `answers` is a list of dicts: [{"question_id": "q1", "answer": "..."}, ...]
+        answers: [{"question_id": "q1", "answer": "..."}, ...]
         """
         existing = self.db.session_questions.find_one(
             {"session_id": session_id, "section_id": section_id}
         )
         if not existing:
-            return {"status": "error", "detail": "Questions doc not found – generate questions first"}
+            return {"status": "error", "detail": "Questions doc not found — generate questions first"}
 
-        # Merge answers into the structured questions list
         answer_map = {a["question_id"]: a["answer"] for a in answers}
         updated_questions = []
         for q in existing["questions"]:
@@ -121,15 +125,18 @@ class OrchestratorService:
 
         return {"status": "answers_saved", "question_doc_id": existing["_id"]}
 
-    # ------------------------------------------------------------------
-    # STEP 3 – Generate section content using the saved Q&A
-    # ------------------------------------------------------------------
+
+    # STEP 3 – Generate section content using Q&A + company_context
+
     async def generate_section_content(
-        self, session_id: str, section_json: dict, template_json: dict
+        self,
+        session_id: str,
+        section_json: dict,
+        template_json: dict,
+        company_context: dict | None = None,
     ) -> dict:
         section_id = section_json["id"]
 
-        # Fetch Q&A doc
         qa_doc = self.db.session_questions.find_one(
             {"session_id": session_id, "section_id": section_id}
         )
@@ -148,21 +155,25 @@ class OrchestratorService:
                 "unanswered_question_ids": unanswered,
             }
 
-        # Build qa_pairs for the section service
+        # Build qa_pairs
         qa_pairs = [
             {"question": q["question_text"], "answer": q["answer"]}
             for q in qa_doc["questions"]
         ]
 
-        # Call LLM to write the section
+        # Use company_context stored in qa_doc as fallback if not passed directly
+        resolved_context = company_context or qa_doc.get("company_context") or None
+
+        # Call LLM to write the section — pass company_context
         content: str = await self.section_service.generate_section(
             section_json,
             qa_pairs,
             template_json.get("generation_rules", {}),
             template_json.get("terminology_rules", {}),
+            company_context=resolved_context,
         )
 
-        # Upsert into doc_sections (allow regeneration)
+        # Upsert into doc_sections
         existing_sec = self.db.doc_sections.find_one(
             {"session_id": session_id, "section_id": section_id}
         )
@@ -200,11 +211,14 @@ class OrchestratorService:
             "content": content,
         }
 
-    # ------------------------------------------------------------------
+
     # STEP 4 – Approve section (with optional manual edit)
-    # ------------------------------------------------------------------
+
     def approve_section(
-        self, session_id: str, section_id: str, edited_content: str | None = None
+        self,
+        session_id: str,
+        section_id: str,
+        edited_content: str | None = None,
     ) -> dict:
         section_doc = self.db.doc_sections.find_one(
             {"session_id": session_id, "section_id": section_id}
@@ -220,7 +234,6 @@ class OrchestratorService:
             {"_id": section_doc["_id"]}, {"$set": update_fields}
         )
 
-        # Advance session index
         session = self.db.doc_sessions.find_one({"_id": session_id})
         new_index = session["current_section_index"] + 1
         all_done = new_index >= session["total_sections"]

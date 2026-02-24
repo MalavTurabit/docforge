@@ -10,10 +10,12 @@ dependencies = [
     "fpdf2>=2.8.5",
     "langchain-core>=1.2.13",
     "langchain-openai>=1.1.10",
+    "markdown>=3.10.2",
     "mongo>=0.2.0",
     "pydantic>=2.12.5",
     "pydantic-settings>=2.13.0",
     "pymongo>=4.16.0",
     "python-dotenv>=1.2.1",
+    "streamlit>=1.54.0",
     "uvicorn>=0.41.0",
 ]
