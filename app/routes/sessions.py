@@ -36,6 +36,11 @@ class ApproveSectionRequest(BaseModel):
 class CompileRequest(BaseModel):
     doc_title: Optional[str] = "Document"
 
+class EnhanceSectionRequest(BaseModel):
+    section_id: str
+    enhance_prompt: str
+    company_context: Optional[dict] = {}
+
 class PublishRequest(BaseModel):
     notion_database_id: str
     doc_title: Optional[str] = "Document"
@@ -256,6 +261,52 @@ def get_sections(session_id: str):
             }
             for d in docs
         ]
+    }
+
+# ─── Enhance Section ───────────────────────────────────────────
+@router.post("/{session_id}/enhance_section")
+async def enhance_section(session_id: str, payload: EnhanceSectionRequest):
+    db = get_db()
+
+    # Get session & template
+    session = db.doc_sessions.find_one({"_id": session_id})
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    template = db.document_templates.find_one({"_id": session["template_id"]})
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    template_json = template["template_json"]
+    sections      = template_json.get("sections", [])
+
+    # Find the section metadata from template
+    section_meta = next((s for s in sections if s["id"] == payload.section_id), None)
+    if not section_meta:
+        raise HTTPException(status_code=404, detail=f"Section '{payload.section_id}' not found in template")
+
+    # Get the current approved content
+    sec_doc = db.doc_sections.find_one({"session_id": session_id, "section_id": payload.section_id})
+    if not sec_doc:
+        raise HTTPException(status_code=404, detail="Section content not found")
+
+    current_content = sec_doc.get("content", "")
+    generation_rules = dict(template_json.get("generation_rules", {}))
+
+    svc = SectionService()
+    enhanced = await svc.enhance_section(
+        section_json     = section_meta,
+        current_content  = current_content,
+        enhance_prompt   = payload.enhance_prompt,
+        company_context  = payload.company_context or {},
+        generation_rules = generation_rules,
+    )
+
+    return {
+        "section_id":     payload.section_id,
+        "section_title":  section_meta.get("title", payload.section_id),
+        "original":       current_content,
+        "enhanced":       enhanced,
     }
 
 # ─── Compile ───────────────────────────────────────────────────
