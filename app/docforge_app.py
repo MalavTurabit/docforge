@@ -113,14 +113,16 @@ section[data-testid="stSidebar"] > div:first-child {
     background: rgba(255,255,255,0.15) !important;
 }
 /* Hide doc history click-trigger buttons — clicks handled via HTML overlay */
-[data-testid="stSidebar"] [data-testid="stButton"]:not(:first-child) button {
-    visibility: hidden !important;
-    height: 0 !important;
-    padding: 0 !important;
-    margin: 0 !important;
-    min-height: 0 !important;
-    border: none !important;
+[data-testid="stSidebar"] [data-testid="stButton"]:not(:first-child) {
     position: absolute !important;
+    width: 0 !important;
+    height: 0 !important;
+    overflow: hidden !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+}
+[data-testid="stSidebar"] [data-testid="stButton"]:not(:first-child) button {
+    display: none !important;
 }
 
 /* ── Buttons ── */
@@ -146,9 +148,9 @@ section[data-testid="stSidebar"] > div:first-child {
 .sb-wrap { display: flex; flex-direction: column; min-height: 100vh; padding-bottom: 1rem; }
 
 .sb-brand {
-    padding: 1.2rem 1.1rem 1rem;
+    padding: 1.0rem 1.1rem 1rem;
     border-bottom: 1px solid rgba(255,255,255,0.07);
-    font-size: 1rem; font-weight: 700; color: #f9fafb;
+    font-size: 1.8rem; font-weight: 850; color: #f9fafb;
     letter-spacing: -0.02em;
 }
 .sb-brand .ac { color: #818cf8; }
@@ -291,6 +293,53 @@ section[data-testid="stSidebar"] > div:first-child {
 .fsec { font-size: 0.63rem; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; color: #9ca3af; padding: 0.65rem 0 0.4rem; border-top: 1px solid #f3f4f6; margin-top: 0.4rem; display: block; }
 .fsec:first-of-type { border-top: none; padding-top: 0; margin-top: 0; }
 @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.2;} }
+
+/* ══ ENHANCE PANEL ══ */
+.enh-panel-hdr {
+    background: linear-gradient(135deg, #f5f7ff, #eef2ff);
+    border: 1.5px solid #c7d2fe;
+    border-radius: 12px 12px 0 0;
+    padding: 1rem 1.2rem 0.8rem;
+    margin-top: 1rem;
+    border-bottom: none;
+}
+/* Wrap everything after the header in a panel look via sibling targeting */
+.enh-title {
+    font-size: 0.9rem; font-weight: 700; color: #1f2937;
+    margin-bottom: 0.2rem;
+}
+.enh-sub { font-size: 0.74rem; color: #9ca3af; margin-bottom: 0; line-height: 1.5; }
+.enh-presets {
+    display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.9rem;
+}
+.enh-preset {
+    display: inline-flex; align-items: center; gap: 0.25rem;
+    font-size: 0.72rem; font-weight: 500;
+    background: #eef2ff; color: #4f6ef7;
+    border: 1px solid #c7d2fe; border-radius: 20px;
+    padding: 0.22rem 0.65rem; cursor: pointer;
+    transition: all 0.12s; white-space: nowrap;
+}
+.enh-preset:hover { background: #e0e7ff; border-color: #818cf8; }
+.enh-preset.active { background: #4f6ef7; color: #fff; border-color: #4f6ef7; }
+
+/* Side-by-side result */
+.enh-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1rem; }
+.enh-col-hdr {
+    font-size: 0.62rem; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase; padding: 0.4rem 0.8rem;
+    border-radius: 6px 6px 0 0; margin-bottom: 0;
+}
+.enh-col-hdr.orig { background: #f3f4f6; color: #9ca3af; }
+.enh-col-hdr.new  { background: #eef2ff; color: #4f6ef7; }
+.enh-col-body {
+    font-size: 0.77rem; line-height: 1.8; color: #4b5563;
+    background: #fafafa; border: 1px solid #e5e7eb;
+    border-radius: 0 0 8px 8px; padding: 0.85rem; min-height: 120px;
+    max-height: 320px; overflow-y: auto; white-space: pre-wrap;
+}
+.enh-col-body.new { background: #f5f7ff; border-color: #c7d2fe; color: #1f2937; }
+.enh-actions { display: flex; gap: 0.6rem; margin-top: 0.75rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -302,9 +351,9 @@ DEPT_DISPLAY = {
     "dept_engineering":         ("⚙️","Engineering"),
     "dept_qa":                  ("🔍","QA"),
     "dept_support":             ("🎧","Support"),
-    "dept_business__operations": ("🏢","Business Ops"),
-    "dept_legal__compliance":    ("⚖️","Legal & Compliance"),
-    "dept_it__security":                  ("🖥️","IT & Security"),
+    "dept_business_operations": ("🏢","Business Ops"),
+    "dept_legal__compliance":   ("⚖️","Legal & Compliance"),
+    "dept_it__security":         ("🖥️","IT & Security"),
     "dept_sales__marketing":     ("📊","Sales & Marketing"),
 }
 def dept_display(dept_id, raw_name=""):
@@ -319,6 +368,8 @@ DEFAULTS = {
     "editing":False,"preview_sections":[],"all_done":False,"compiled_content":None,
     "document_id":None,"history":[],"need_fetch":True,"need_questions":False,
     "api_ok":None,"viewing_doc":None,
+    # Enhance feature state
+    "enhance_result":None,"enhance_section_id":None,"enhance_accepted":False,
 }
 for k,v in DEFAULTS.items():
     if k not in st.session_state: st.session_state[k] = v
@@ -409,9 +460,9 @@ def render_sidebar():
         if st.button("＋  New Document", key="sb_new", use_container_width=True):
             reset(); st.session_state.viewing_doc = None; st.rerun()
 
-        # ── Doc history click buttons (hidden, just for interactivity) ──
+        # ── Doc history click buttons (hidden via CSS, just for interactivity) ──
         for doc in compiled[:8]:
-            if st.button(f"open_{doc['session_id']}", key=f"h_{doc['session_id']}",
+            if st.button("​", key=f"h_{doc['session_id']}",
                          use_container_width=True):
                 st.session_state.viewing_doc = doc
                 st.session_state.page = "view_doc"
@@ -683,6 +734,138 @@ def _approve_panel():
             if st.button("✓  Approve →", use_container_width=True, type="primary", key="btn_approve"):
                 do_approve(sec_id, None)
 
+ENHANCE_PRESETS = [
+    ("✦ Make it longer",       "Expand this section significantly. Add more detail, examples, and elaboration while maintaining professional tone."),
+    ("⚡ More formal",          "Rewrite this section in a more formal, professional tone suitable for board-level or investor audiences."),
+    ("✂ Make it concise",      "Condense this section to its key points only. Remove redundancy, keep it tight and clear."),
+    ("📋 Add bullet points",   "Restructure the content using clear bullet points and sub-bullets for better readability."),
+    ("📊 Add a table",         "Where appropriate, convert data or comparisons in this section into a well-formatted Markdown table."),
+    ("💡 Add examples",        "Add 2-3 concrete real-world examples to illustrate the key points in this section."),
+    ("🔍 More specific",       "Make this section more specific and data-driven. Replace vague statements with precise claims and metrics where possible."),
+    ("🌐 Industry language",   "Rewrite using industry-standard terminology and professional jargon appropriate for this sector."),
+]
+
+def _enhance_panel():
+    sess     = st.session_state.session_id
+    sections = st.session_state.preview_sections
+
+    if not sections:
+        st.info("Generate and approve sections first to enable enhancement.", icon="ℹ️")
+        return
+
+    st.markdown(
+        '<div class="enh-panel-hdr">'
+        '<div class="enh-title">✨ Enhance a Section</div>'
+        '<div class="enh-sub">Select a section, choose a preset or write your own instruction, '
+        'then review the AI-enhanced result side-by-side before accepting.</div>'
+        '</div>',
+        unsafe_allow_html=True)
+
+    # ── Section selector ─────────────────────────────────────
+    section_options = {s["section_title"]: s["section_id"] for s in sections}
+    selected_title  = st.selectbox("Select section to enhance",
+                                    list(section_options.keys()),
+                                    key="enh_section_sel",
+                                    label_visibility="collapsed")
+    selected_id = section_options[selected_title]
+
+    # ── Preset chips (rendered as buttons) ───────────────────
+    st.markdown('<div style="font-size:0.72rem;font-weight:600;color:#6b7280;margin:0.6rem 0 0.35rem;">Quick presets</div>',
+                unsafe_allow_html=True)
+
+    # Render in rows of 4
+    preset_prompt = st.session_state.get("enh_preset_text", "")
+    cols_per_row  = 4
+    for row_start in range(0, len(ENHANCE_PRESETS), cols_per_row):
+        row = ENHANCE_PRESETS[row_start : row_start + cols_per_row]
+        cols = st.columns(len(row), gap="small")
+        for col, (label, prompt_text) in zip(cols, row):
+            with col:
+                if st.button(label, key=f"preset_{row_start}_{label[:8]}", use_container_width=True):
+                    st.session_state["enh_preset_text"] = prompt_text
+                    st.session_state["enh_custom_text"] = prompt_text
+                    st.rerun()
+
+    # ── Custom prompt ─────────────────────────────────────────
+    st.markdown('<div style="font-size:0.72rem;font-weight:600;color:#6b7280;margin:0.7rem 0 0.3rem;">Or describe what you want</div>',
+                unsafe_allow_html=True)
+    custom = st.text_area(
+        "", key="enh_custom_text",
+        placeholder="e.g. Make this section longer with specific KPIs, add a risk mitigation table, rewrite in executive tone...",
+        height=88, label_visibility="collapsed"
+    )
+
+    # ── Enhance button ────────────────────────────────────────
+    enhance_prompt = custom.strip() if custom.strip() else preset_prompt
+    btn_disabled   = not enhance_prompt
+
+    if st.button("✨  Enhance Section →", type="primary", use_container_width=True,
+                  key="btn_enhance", disabled=btn_disabled):
+        with st.spinner(f"AI is enhancing '{selected_title}'..."):
+            data, err = api("post", f"/sessions/{sess}/enhance_section", json={
+                "section_id":     selected_id,
+                "enhance_prompt": enhance_prompt,
+                "company_context": st.session_state.company_context,
+            })
+        if err:
+            st.error(f"Enhancement failed: {err}")
+        else:
+            st.session_state.enhance_result     = data
+            st.session_state.enhance_section_id = selected_id
+            st.session_state.enhance_accepted   = False
+            st.rerun()
+
+    # ── Side-by-side result ───────────────────────────────────
+    result = st.session_state.enhance_result
+    if result and st.session_state.enhance_section_id == selected_id:
+        if st.session_state.enhance_accepted:
+            st.success(f"✓ Enhancement accepted for **{result.get('section_title','')}**")
+        else:
+            st.markdown("---")
+            st.markdown('<div style="font-size:0.78rem;font-weight:600;color:#1f2937;margin-bottom:0.6rem;">Review changes</div>',
+                        unsafe_allow_html=True)
+            c1, c2 = st.columns(2, gap="medium")
+            with c1:
+                st.markdown('<div class="enh-col-hdr orig">📄 Original</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="enh-col-body">{result.get("original","")}</div>',
+                            unsafe_allow_html=True)
+            with c2:
+                st.markdown('<div class="enh-col-hdr new">✨ Enhanced</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="enh-col-body new">{result.get("enhanced","")}</div>',
+                            unsafe_allow_html=True)
+
+            st.markdown('<div style="height:0.6rem"></div>', unsafe_allow_html=True)
+            a1, a2, a3 = st.columns([3, 3, 4], gap="small")
+            with a1:
+                if st.button("✓ Accept & Save", type="primary", use_container_width=True, key="btn_enh_accept"):
+                    # Save enhanced content back to doc_sections via approve endpoint
+                    with st.spinner("Saving..."):
+                        _, err = api("post", f"/sessions/{sess}/approve_section", json={
+                            "section_id":     selected_id,
+                            "edited_content": result["enhanced"],
+                        })
+                    if err:
+                        st.error(err)
+                    else:
+                        # Update preview panel locally
+                        upsert_preview(selected_id, result.get("section_title", selected_title),
+                                       result["enhanced"], "approved")
+                        # If compiled, clear so user re-compiles with new content
+                        st.session_state.compiled_content = None
+                        st.session_state.enhance_accepted = True
+                        st.session_state.enhance_result   = None
+                        st.rerun()
+            with a2:
+                if st.button("✕ Discard", type="secondary", use_container_width=True, key="btn_enh_discard"):
+                    st.session_state.enhance_result   = None
+                    st.session_state.enhance_accepted = False
+                    st.rerun()
+            with a3:
+                st.markdown('<div style="font-size:0.7rem;color:#9ca3af;padding-top:0.5rem;">Accepting will require re-compiling the document.</div>',
+                            unsafe_allow_html=True)
+
+
+
 def _done_left():
     sess=st.session_state.session_id
     st.markdown('<div class="done-banner"><div class="done-title">🎉 All sections complete!</div>'
@@ -714,6 +897,10 @@ def _done_left():
                                    json={"notion_database_id":nid.strip(),"doc_title":st.session_state.template_name})
                     if err: st.error(err)
                     else: st.success("Published to Notion ✓")
+
+    # ── Enhance section panel — always visible after all done ──
+    st.markdown('<div style="height:0.4rem"></div>', unsafe_allow_html=True)
+    _enhance_panel()
 
 def render_markdown(text: str) -> str:
     """Convert markdown to HTML for safe rendering in preview."""

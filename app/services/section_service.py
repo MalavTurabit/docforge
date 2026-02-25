@@ -60,3 +60,55 @@ OUTPUT FORMAT RULES — STRICTLY FOLLOW:
 Write this section now:"""
 
         return await self.llm.generate(prompt)
+
+    async def enhance_section(
+        self,
+        section_json: dict,
+        current_content: str,
+        enhance_prompt: str,
+        company_context: dict,
+        generation_rules: dict,
+    ) -> str:
+        context_block = ""
+        if company_context:
+            context_block = f"""
+COMPANY CONTEXT:
+- Company: {company_context.get('company_name', '')}
+- Product: {company_context.get('product_name', '')} — {company_context.get('product_description', '')}
+- Industry: {company_context.get('industry_vertical', '')}
+- Stage: {company_context.get('company_stage', '')}
+- Target customer: {company_context.get('target_customer', '')}
+"""
+
+        prompt = f"""You are an expert document writer enhancing an existing section based on a user's instruction.
+
+SECTION METADATA:
+{json.dumps(section_json, indent=2)}
+{context_block}
+CURRENT CONTENT:
+{current_content}
+
+GENERATION RULES:
+{json.dumps(generation_rules, indent=2)}
+
+USER ENHANCEMENT INSTRUCTION:
+{enhance_prompt}
+
+YOUR TASK:
+- Rewrite and enhance the section following the user's instruction EXACTLY
+- Maintain consistency with the company context and section purpose
+- Keep all factual information already present unless instructed otherwise
+- Return ONLY the improved section content — no titles, no commentary, no "Here is..."
+
+OUTPUT FORMAT RULES — STRICTLY FOLLOW:
+1. Output in clean Markdown
+2. Use **bold** for field labels and important terms
+3. If the section contains structured data, use a proper Markdown table
+4. Use bullet lists where items are enumerable
+5. Do NOT use HTML tags
+6. Do NOT add a heading — section title is already shown above
+7. Write ONLY the enhanced section content
+
+Enhanced section:"""
+
+        return await self.llm.generate(prompt)
