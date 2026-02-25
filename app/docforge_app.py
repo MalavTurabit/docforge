@@ -56,8 +56,23 @@ section[data-testid="stSidebar"] > div:first-child {
 
 /* remove default streamlit sidebar padding/gaps */
 [data-testid="stSidebar"] .block-container { padding: 0 !important; }
-[data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap: 0 !important; }
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
+    gap: 0 !important;
+    display: flex !important;
+    flex-direction: column !important;
+}
 [data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] { padding: 0 !important; }
+
+/* Visual reorder using CSS order:
+   1st child = brand HTML  → order 1
+   2nd child = New Doc btn → order 2
+   3rd child = hidden btns → order 4 (after nav)
+   4th child = nav HTML    → order 3
+*/
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div:nth-child(1) { order: 1 !important; }
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div:nth-child(2) { order: 2 !important; }
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div:nth-child(3) { order: 4 !important; }
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div:nth-child(4) { order: 3 !important; }
 
 /* ── Main content ── */
 .block-container { padding: 2rem 2.5rem !important; max-width: 100% !important; }
@@ -131,9 +146,9 @@ section[data-testid="stSidebar"] > div:first-child {
 .sb-wrap { display: flex; flex-direction: column; min-height: 100vh; padding-bottom: 1rem; }
 
 .sb-brand {
-    padding: 1.8rem 1.1rem 1rem;
+    padding: 1.2rem 1.1rem 1rem;
     border-bottom: 1px solid rgba(255,255,255,0.07);
-    font-size: 1.2rem; font-weight: 700; color: #f9fafb;
+    font-size: 1rem; font-weight: 700; color: #f9fafb;
     letter-spacing: -0.02em;
 }
 .sb-brand .ac { color: #818cf8; }
@@ -219,9 +234,29 @@ section[data-testid="stSidebar"] > div:first-child {
 .q-text { font-size: 0.875rem; color: #374151; line-height: 1.6; margin-bottom: 0.35rem; }
 .q-div  { height: 1px; background: #f3f4f6; margin: 0.85rem 0; }
 
-.preview-outer { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; height: calc(100vh - 80px); }
-.preview-hdr   { flex-shrink: 0; border-bottom: 1px solid #f3f4f6; padding: 0.85rem 1.4rem; }
+.preview-outer {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 120px);
+    position: sticky;
+    top: 1rem;
+}
+.preview-hdr   { flex-shrink: 0; border-bottom: 1px solid #f3f4f6; padding: 0.85rem 1.4rem; background: #fff; }
 .preview-hdr-lbl { font-size: 0.63rem; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; color: #9ca3af; }
+.preview-doc-title {
+    font-size: 1.25rem; font-weight: 700; color: #0f2044;
+    letter-spacing: -0.02em; padding: 0.1rem 0 0.4rem;
+    line-height: 1.3;
+}
+.preview-doc-divider {
+    height: 3px; width: 48px;
+    background: linear-gradient(90deg, #4f6ef7, #818cf8);
+    border-radius: 3px; margin-bottom: 1.2rem;
+}
 .preview-body  { flex: 1; overflow-y: auto; padding: 1.25rem 1.4rem; }
 .preview-empty { padding: 3rem 1rem; text-align: center; }
 .preview-empty-icon { font-size: 2rem; opacity: 0.3; margin-bottom: 0.6rem; }
@@ -267,9 +302,9 @@ DEPT_DISPLAY = {
     "dept_engineering":         ("⚙️","Engineering"),
     "dept_qa":                  ("🔍","QA"),
     "dept_support":             ("🎧","Support"),
-    "dept_business_operations": ("🏢","Business Ops"),
-    "dept_legal__compliance":   ("⚖️","Legal & Compliance"),
-    "dept_it__security":         ("🖥️","IT & Security"),
+    "dept_business__operations": ("🏢","Business Ops"),
+    "dept_legal__compliance":    ("⚖️","Legal & Compliance"),
+    "dept_it__security":                  ("🖥️","IT & Security"),
     "dept_sales__marketing":     ("📊","Sales & Marketing"),
 }
 def dept_display(dept_id, raw_name=""):
@@ -655,7 +690,8 @@ def _done_left():
                 unsafe_allow_html=True)
     if not st.session_state.compiled_content:
         if st.button("Compile Document →", use_container_width=True, type="primary", key="btn_compile"):
-            with st.spinner("Compiling..."): data, err = api("post", f"/sessions/{sess}/compile")
+            with st.spinner("Compiling..."): data, err = api("post", f"/sessions/{sess}/compile",
+                                                               json={"doc_title": st.session_state.template_name})
             if err: st.error(err); return
             st.session_state.document_id=data["document_id"]
             sec_data, _ = api("get", f"/sessions/{sess}/sections")
@@ -684,8 +720,9 @@ def render_markdown(text: str) -> str:
     return md_lib.markdown(text, extensions=["tables", "nl2br", "sane_lists"])
 
 def _preview_panel():
-    # Build entire preview as ONE html string — prevents Streamlit from
-    # breaking open divs by injecting widgets between separate st.markdown() calls
+    # Build 100% of preview content as a single HTML string in one st.markdown call.
+    # This is the ONLY way to guarantee content renders inside the container —
+    # any separate st.markdown() calls get injected outside by Streamlit's renderer.
     inner = ""
 
     if st.session_state.compiled_content:
@@ -701,7 +738,9 @@ def _preview_panel():
             chip  = ('<span class="chip chip-a">✓ approved</span>' if s["status"] == "approved"
                      else '<span class="chip chip-g">● generated</span>')
             inner += (f'<div class="psec">'
-                      f'<div class="psec-hdr"><div class="psec-name">{s["section_title"]}</div>{chip}</div>'
+                      f'<div class="psec-hdr">'
+                      f'<div class="psec-name">{s["section_title"]}</div>{chip}'
+                      f'</div>'
                       f'<div class="psec-body">{render_markdown(s.get("content",""))}</div>'
                       f'</div>')
     else:
@@ -710,12 +749,16 @@ def _preview_panel():
                  '<div class="preview-empty-txt">Approved sections will appear here</div>'
                  '</div>')
 
+    # Single call — everything inside one coherent HTML block
     st.markdown(
         f'<div class="preview-outer">'
-        f'<div class="preview-hdr"><div class="preview-hdr-lbl">📄 Document Preview</div></div>'
-        f'<div class="preview-body">{inner}</div>'
+        f'  <div class="preview-hdr">'
+        f'    <div class="preview-hdr-lbl">📄 Document Preview</div>'
+        f'  </div>'
+        f'  <div class="preview-body">{inner}</div>'
         f'</div>',
-        unsafe_allow_html=True)
+        unsafe_allow_html=True
+    )
 
 # ─────────────────────────────────────────────────────────────
 if st.session_state.page == "home":         page_home()
