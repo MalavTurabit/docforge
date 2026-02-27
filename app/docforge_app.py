@@ -63,16 +63,7 @@ section[data-testid="stSidebar"] > div:first-child {
 }
 [data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] { padding: 0 !important; }
 
-/* Visual reorder using CSS order:
-   1st child = brand HTML  → order 1
-   2nd child = New Doc btn → order 2
-   3rd child = hidden btns → order 4 (after nav)
-   4th child = nav HTML    → order 3
-*/
-[data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div:nth-child(1) { order: 1 !important; }
-[data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div:nth-child(2) { order: 2 !important; }
-[data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div:nth-child(3) { order: 4 !important; }
-[data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div:nth-child(4) { order: 3 !important; }
+/* No reordering needed — sidebar renders in correct order */
 
 /* ── Main content ── */
 .block-container { padding: 2rem 2.5rem !important; max-width: 100% !important; }
@@ -98,31 +89,47 @@ section[data-testid="stSidebar"] > div:first-child {
 }
 [data-testid="stWidgetLabel"] p { color: #374151 !important; font-size: 0.78rem !important; font-weight: 500 !important; }
 
-/* ── Sidebar: New Document button styling ── */
-[data-testid="stSidebar"] [data-testid="stButton"]:first-child button {
+/* ── Sidebar: New Document button ── */
+[data-testid="stSidebar"] button[kind="secondary"].sb-new-btn-widget {
+    background: rgba(255,255,255,0.09) !important;
+    color: rgba(255,255,255,0.88) !important;
+    border: 1px solid rgba(255,255,255,0.14) !important;
+    border-radius: 8px !important;
+    font-size: 0.82rem !important; font-weight: 500 !important;
+    margin: 0.5rem 0 0.2rem !important;
+}
+[data-testid="stSidebar"] button[kind="secondary"].sb-new-btn-widget:hover {
+    background: rgba(255,255,255,0.16) !important;
+}
+
+/* ── Sidebar: all buttons base reset ── */
+[data-testid="stSidebar"] [data-testid="stButton"] button {
     background: rgba(255,255,255,0.09) !important;
     color: rgba(255,255,255,0.88) !important;
     border: 1px solid rgba(255,255,255,0.14) !important;
     border-radius: 8px !important;
     font-size: 0.82rem !important;
     font-weight: 500 !important;
-    margin: 0.6rem 0.5rem 0.2rem !important;
-    width: calc(100% - 1rem) !important;
 }
-[data-testid="stSidebar"] [data-testid="stButton"]:first-child button:hover {
+[data-testid="stSidebar"] [data-testid="stButton"] button:hover {
     background: rgba(255,255,255,0.15) !important;
 }
-/* Hide doc history click-trigger buttons — clicks handled via HTML overlay */
-[data-testid="stSidebar"] [data-testid="stButton"]:not(:first-child) {
-    position: absolute !important;
-    width: 0 !important;
-    height: 0 !important;
-    overflow: hidden !important;
-    opacity: 0 !important;
-    pointer-events: none !important;
-}
-[data-testid="stSidebar"] [data-testid="stButton"]:not(:first-child) button {
-    display: none !important;
+
+/* ── Library tile buttons — look like doc rows ── */
+[data-testid="stSidebar"] [data-testid="stButton"][id^="lib_"] button,
+[data-testid="stSidebar"] div:has(> div > [data-testid="stButton"] button[id*="lib_"]) button {
+    background: transparent !important;
+    border: none !important;
+    border-radius: 0 !important;
+    color: rgba(255,255,255,0.78) !important;
+    font-size: 0.79rem !important;
+    font-weight: 600 !important;
+    text-align: left !important;
+    padding: 0.5rem 1rem 0.5rem 1.2rem !important;
+    width: 100% !important;
+    margin: 0 !important;
+    white-space: pre-wrap !important;
+    line-height: 1.4 !important;
 }
 
 /* ── Buttons ── */
@@ -148,10 +155,11 @@ section[data-testid="stSidebar"] > div:first-child {
 .sb-wrap { display: flex; flex-direction: column; min-height: 100vh; padding-bottom: 1rem; }
 
 .sb-brand {
-    padding: 1.0rem 1.1rem 1rem;
+    padding: 1.4rem 1.2rem 1.1rem;
     border-bottom: 1px solid rgba(255,255,255,0.07);
-    font-size: 1.8rem; font-weight: 850; color: #f9fafb;
-    letter-spacing: -0.02em;
+    font-size: 1.45rem; font-weight: 800; color: #f9fafb;
+    letter-spacing: -0.04em; line-height: 1;
+    display: flex; align-items: center; gap: 0.4rem;
 }
 .sb-brand .ac { color: #818cf8; }
 
@@ -195,14 +203,31 @@ section[data-testid="stSidebar"] > div:first-child {
 .sb-hr { height: 1px; background: rgba(255,255,255,0.07); margin: 0.6rem 1.1rem; }
 
 .sb-doc {
-    display: flex; align-items: flex-start; gap: 0.6rem;
-    padding: 0.6rem 1.1rem; border-left: 3px solid transparent;
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.55rem 1rem 0.55rem 1.1rem;
+    border-left: 3px solid transparent;
+    cursor: pointer; transition: background 0.12s;
 }
-.sb-doc.active { background: rgba(99,102,241,0.15); border-left-color: #6366f1; }
-.sb-doc-icon { font-size: 0.85rem; flex-shrink: 0; opacity: 0.5; margin-top: 0.1rem; }
-.sb-doc-name { font-size: 0.78rem; font-weight: 500; color: rgba(255,255,255,0.6); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; }
+.sb-doc:hover { background: rgba(255,255,255,0.06); }
+.sb-doc.active { background: rgba(99,102,241,0.18); border-left-color: #6366f1; }
+.sb-doc-icon { font-size: 0.9rem; flex-shrink: 0; opacity: 0.45; }
+.sb-doc-name {
+    font-size: 0.8rem; font-weight: 600;
+    color: rgba(255,255,255,0.75);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    line-height: 1.35;
+}
 .sb-doc.active .sb-doc-name { color: #c7d2fe; }
-.sb-doc-meta { font-size: 0.65rem; color: rgba(255,255,255,0.25); margin-top: 0.1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sb-doc-meta {
+    font-size: 0.62rem; color: rgba(255,255,255,0.28);
+    margin-top: 0.15rem;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sb-doc-arrow {
+    font-size: 0.9rem; color: rgba(255,255,255,0.2);
+    flex-shrink: 0; margin-left: auto; line-height: 1;
+}
+.sb-doc.active .sb-doc-arrow { color: #818cf8; }
 
 .sb-footer { padding: 0 1.1rem 0.5rem; margin-top: auto; }
 .api-pill { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.68rem; font-weight: 500; padding: 0.28rem 0.65rem; border-radius: 20px; }
@@ -370,6 +395,8 @@ DEFAULTS = {
     "api_ok":None,"viewing_doc":None,
     # Enhance feature state
     "enhance_result":None,"enhance_section_id":None,"enhance_accepted":False,
+    # Notion publish result
+    "notion_result":None,
 }
 for k,v in DEFAULTS.items():
     if k not in st.session_state: st.session_state[k] = v
@@ -452,23 +479,17 @@ def render_sidebar():
             (4,"Generate",     page in ("generating","view_doc"),                False),
         ]
 
-        # ── Brand title (pure HTML, no widget — renders immediately) ──
+        # ── 1. Brand ──────────────────────────────────────────
         st.markdown('<div class="sb-brand">📋 Doc<span class="ac">Forge</span></div>',
                     unsafe_allow_html=True)
 
-        # ── New Document button — right after brand ──
+        # ── 2. New Document button ─────────────────────────────
+        st.markdown('<div style="padding:0.6rem 0.8rem 0.3rem">', unsafe_allow_html=True)
         if st.button("＋  New Document", key="sb_new", use_container_width=True):
             reset(); st.session_state.viewing_doc = None; st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
-        # ── Doc history click buttons (hidden via CSS, just for interactivity) ──
-        for doc in compiled[:8]:
-            if st.button("​", key=f"h_{doc['session_id']}",
-                         use_container_width=True):
-                st.session_state.viewing_doc = doc
-                st.session_state.page = "view_doc"
-                st.rerun()
-
-        # ── Rest of sidebar as one HTML block ──
+        # ── 3. Current Session nav (pure HTML, no widgets) ────
         h  = '<div class="sb-lbl">Current Session</div>'
         for num, label, is_active, is_done in steps:
             cls  = "sb-step active" if is_active else ("sb-step done" if is_done else "sb-step")
@@ -478,39 +499,58 @@ def render_sidebar():
                   f'<div class="sb-step-label">{label}</div>'
                   f'</div>')
 
-        if compiled:
-            h += '<div class="sb-hr"></div>'
-            h += '<div class="sb-lbl">Generated Docs</div>'
-            for doc in compiled[:8]:
-                is_cur = (st.session_state.viewing_doc and
-                          st.session_state.viewing_doc.get("session_id") == doc["session_id"])
-                dc = "sb-doc active" if is_cur else "sb-doc"
-                h += (f'<div class="{dc}">'
-                      f'<span class="sb-doc-icon">📄</span>'
-                      f'<div style="min-width:0">'
-                      f'<div class="sb-doc-name">{doc["doc_name"]}</div>'
-                      f'<div class="sb-doc-meta">{doc.get("dept_name","")} · {doc.get("created_at","")}</div>'
-                      f'</div></div>')
-
+        # ── 4. In Progress (HTML only, no click needed) ────────
         if in_prog:
             h += '<div class="sb-hr"></div>'
             h += '<div class="sb-lbl">In Progress</div>'
             for doc in in_prog[:4]:
+                name = doc.get("doc_name","").strip() or "Untitled"
+                meta = " · ".join(filter(None,[doc.get("dept_name",""), doc.get("created_at","")]))
                 h += (f'<div class="sb-doc">'
                       f'<span class="sb-doc-icon">✏️</span>'
                       f'<div style="min-width:0">'
-                      f'<div class="sb-doc-name">{doc["doc_name"]}</div>'
-                      f'<div class="sb-doc-meta">{doc.get("dept_name","")} · {doc.get("created_at","")}</div>'
+                      f'<div class="sb-doc-name">{name}</div>'
+                      f'<div class="sb-doc-meta">{meta}</div>'
                       f'</div></div>')
 
-        h += (f'<div style="flex:1"></div>'
-              f'<div class="sb-footer">'
-              f'<div class="sb-hr" style="margin:0 0 0.6rem;"></div>'
+        # ── 5. API pill footer ─────────────────────────────────
+        h += (f'<div style="margin-top:auto;padding:0.8rem 1.1rem 0.9rem">'
+              f'<div class="sb-hr" style="margin:0 0 0.7rem"></div>'
               f'<div class="{api_cls}"><span class="api-dot"></span>{api_txt}</div>'
-              f'</div>'
               f'</div>')
 
         st.markdown(h, unsafe_allow_html=True)
+
+        # ── 6. Library — real st.buttons styled as tiles ───────
+        # These MUST come after the HTML block so they render below it.
+        # Real buttons = zero leaking, zero invisible containers.
+        if compiled:
+            st.markdown('<div class="sb-hr" style="margin:0.2rem 1.1rem 0"></div>'
+                        '<div class="sb-lbl">Library</div>', unsafe_allow_html=True)
+            for doc in compiled[:8]:
+                is_cur = (st.session_state.viewing_doc and
+                          st.session_state.viewing_doc.get("session_id") == doc["session_id"])
+                title  = doc.get("doc_name","").strip() or doc.get("dept_name","") or "Document"
+                dept   = doc.get("dept_name","")
+                date   = doc.get("created_at","")
+                meta   = f"{dept} · {date}" if dept else date
+                # Highlight active tile
+                tile_bg = "rgba(99,102,241,0.18)" if is_cur else "transparent"
+                border  = "#6366f1" if is_cur else "transparent"
+                st.markdown(
+                    f'<div style="border-left:3px solid {border};background:{tile_bg};">',
+                    unsafe_allow_html=True
+                )
+                btn_label = f"📄  {title}" + (f"\n{meta}" if meta else "")
+                if st.button(
+                    btn_label,
+                    key=f"lib_{doc['session_id']}",
+                    use_container_width=True
+                ):
+                    st.session_state.viewing_doc = doc
+                    st.session_state.page = "view_doc"
+                    st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
 
 render_sidebar()
 
@@ -542,25 +582,26 @@ def page_view_doc():
         st.markdown(f'<a class="dl-btn" href="{API_BASE}/sessions/{sess}/download_pdf" target="_blank">⬇  Download PDF</a>',
                     unsafe_allow_html=True)
     with c2:
-        if st.button("📤  Publish to Notion", key="btn_notion_view"):
-            st.session_state["show_notion_view"] = not st.session_state.get("show_notion_view",False); st.rerun()
-    if st.session_state.get("show_notion_view"):
-        n1,n2,n3 = st.columns([4,1,1], gap="small")
-        with n1: nid = st.text_input("Notion Database ID", key="nid_view", placeholder="Paste Notion DB ID...")
-        with n2:
-            st.markdown("<div style='margin-top:1.7rem'>", unsafe_allow_html=True)
-            if st.button("Publish", type="primary", key="btn_notion_go"):
-                with st.spinner("Publishing..."):
-                    _, err = api("post", f"/sessions/{sess}/publish_notion",
-                                 json={"notion_database_id":nid.strip(),"doc_title":doc["doc_name"]})
-                if err: st.error(err)
-                else: st.success("Published ✓"); st.session_state["show_notion_view"]=False
-            st.markdown("</div>", unsafe_allow_html=True)
-        with n3:
-            st.markdown("<div style='margin-top:1.7rem'>", unsafe_allow_html=True)
-            if st.button("Cancel", type="secondary", key="btn_notion_cancel"):
-                st.session_state["show_notion_view"]=False; st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
+        notion_view_result = st.session_state.get(f"notion_result_{sess}")
+    if notion_view_result:
+        st.markdown(
+            f'<div style="background:#f0fdf4;border:1.5px solid #bbf7d0;border-radius:10px;'
+            f'padding:0.75rem 1rem;margin-bottom:0.6rem;">'
+            f'<span style="font-size:0.78rem;font-weight:700;color:#16a34a;">✓ Published to Notion</span>'
+            f'&nbsp;&nbsp;<span style="font-size:0.73rem;color:#6b7280;">'
+            f'{notion_view_result.get("version","")} · {notion_view_result.get("industry","")}</span>'
+            f'&nbsp;&nbsp;<a href="{notion_view_result.get("notion_url", "https://www.notion.so/Docforge-30a61ecb2bd280aea04aee04d5344b8a")}" '
+            f'target="_blank" style="font-size:0.73rem;color:#4f6ef7;font-weight:600;'
+            f'text-decoration:none;">Open in Notion →</a></div>',
+            unsafe_allow_html=True
+        )
+    else:
+        if st.button("📤  Publish to Notion", key="btn_notion_view", type="secondary"):
+            with st.spinner("Publishing to Notion..."):
+                data, err = api("post", f"/sessions/{sess}/publish_notion",
+                                json={"doc_title": doc["doc_name"]})
+            if err: st.error(err)
+            else: st.session_state[f"notion_result_{sess}"] = data; st.rerun()
 
     st.markdown('<div class="doc-view-body">', unsafe_allow_html=True)
     for block in content.split("\n\n---\n\n"):
@@ -887,16 +928,34 @@ def _done_left():
         st.success("Document compiled ✓")
         st.markdown(f'<a class="dl-btn" href="{API_BASE}/sessions/{sess}/download_pdf" target="_blank">⬇  Download PDF</a>',
                     unsafe_allow_html=True)
-        with st.expander("📤 Publish to Notion"):
-            nid=st.text_input("Notion Database ID", key="nid", placeholder="Paste your Notion database ID...")
-            if st.button("Publish →", use_container_width=True, key="btn_notion"):
-                if not nid.strip(): st.warning("Enter a Notion Database ID first.")
+        # ── Publish to Notion ──────────────────────────────────
+        notion_result = st.session_state.get("notion_result")
+        if notion_result:
+            st.markdown(
+                f'<div style="background:#f0fdf4;border:1.5px solid #bbf7d0;border-radius:10px;'
+                f'padding:0.85rem 1.1rem;margin-top:0.4rem;">'
+                f'<div style="font-size:0.78rem;font-weight:700;color:#16a34a;margin-bottom:0.2rem;">'
+                f'✓ Published to Notion</div>'
+                f'<div style="font-size:0.73rem;color:#374151;">'
+                f'{notion_result.get("doc_title","")} &nbsp;·&nbsp; '
+                f'{notion_result.get("version","")} &nbsp;·&nbsp; '
+                f'{notion_result.get("industry","")}</div>'
+                f'<a href="{notion_result.get("notion_url", "https://www.notion.so/Docforge-30a61ecb2bd280aea04aee04d5344b8a")}" '
+                f'target="_blank" style="font-size:0.73rem;color:#4f6ef7;font-weight:600;'
+                f'text-decoration:none;">Open in Notion →</a>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+            if st.button("📤 Publish again", use_container_width=True, key="btn_notion_again", type="secondary"):
+                st.session_state.notion_result = None; st.rerun()
+        else:
+            if st.button("📤  Publish to Notion", use_container_width=True, key="btn_notion", type="secondary"):
+                with st.spinner("Publishing to Notion..."):
+                    data, err = api("post", f"/sessions/{sess}/publish_notion",
+                                    json={"doc_title": st.session_state.template_name})
+                if err: st.error(err)
                 else:
-                    with st.spinner("Publishing..."):
-                        _, err=api("post", f"/sessions/{sess}/publish_notion",
-                                   json={"notion_database_id":nid.strip(),"doc_title":st.session_state.template_name})
-                    if err: st.error(err)
-                    else: st.success("Published to Notion ✓")
+                    st.session_state.notion_result = data; st.rerun()
 
     # ── Enhance section panel — always visible after all done ──
     st.markdown('<div style="height:0.4rem"></div>', unsafe_allow_html=True)
