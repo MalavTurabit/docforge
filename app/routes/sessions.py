@@ -522,9 +522,9 @@ def download_pdf(session_id: str):
         headers={"Content-Disposition": f'attachment; filename="{safe_filename}.pdf"'}
     )
 
-# ═══════════════════════════════════════════════════════════════
+
 # NOTION HELPERS
-# ═══════════════════════════════════════════════════════════════
+
 
 def _notion_headers() -> dict:
     return {
