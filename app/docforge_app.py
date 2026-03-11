@@ -377,12 +377,11 @@ DEPT_DISPLAY = {
     "dept_qa":                  ("🔍","QA"),
     "dept_operations":          ("🔧","Operations"),
     "dept_support":             ("🎧","Support"),
-    "dept_marketing":           ("📣","Marketing"),
-    "dept_sales":               ("📈","Sales"),
+    "dept_sales__marketing":    ("📈","Sales"),
     "dept_business_operations": ("🏢","Business Ops"),
-    "dept_legal":               ("⚖️","Legal & Compliance"),
-    "dept_it":                  ("🖥️","IT & Security"),
-    "dept_sales_marketing":     ("📊","Sales & Marketing"),
+    "dept_legal__compliance":    ("⚖️","Legal & Compliance"),
+    "dept_it__security":         ("🖥️","IT & Security"),
+    "dept_sales__marketing":     ("📊","Sales & Marketing"),
 }
 def dept_display(dept_id, raw_name=""):
     if dept_id in DEPT_DISPLAY: return DEPT_DISPLAY[dept_id]
@@ -486,10 +485,14 @@ def render_sidebar():
         st.markdown('<div class="sb-brand">📋 Doc<span class="ac">Forge</span></div>',
                     unsafe_allow_html=True)
 
-        # ── 2. New Document button ─────────────────────────────
-        st.markdown('<div style="padding:0.6rem 0.8rem 0.3rem">', unsafe_allow_html=True)
+        # ── 2. New Document + Library buttons ─────────────────
+        st.markdown('<div style="padding:0.6rem 0.8rem 0.2rem">', unsafe_allow_html=True)
         if st.button("＋  New Document", key="sb_new", use_container_width=True):
             reset(); st.session_state.viewing_doc = None; st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('<div style="padding:0 0.8rem 0.3rem">', unsafe_allow_html=True)
+        if st.button("📚  Notion Library", key="sb_library", use_container_width=True):
+            st.session_state.page = "notion_library"; st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
         # ── 3. Current Session nav (pure HTML, no widgets) ────
@@ -545,10 +548,10 @@ def render_sidebar():
                 st.markdown('</div>', unsafe_allow_html=True)
 
         # ── 5. API pill footer ─────────────────────────────────
-        # h += (f'<div style="margin-top:auto;padding:0.8rem 1.1rem 0.9rem">'
-        #       f'<div class="sb-hr" style="margin:0 0 0.7rem"></div>'
-        #       f'<div class="{api_cls}"><span class="api-dot"></span>{api_txt}</div>'
-        #       f'</div>')
+        h += (f'<div style="margin-top:auto;padding:0.8rem 1.1rem 0.9rem">'
+              f'<div class="sb-hr" style="margin:0 0 0.7rem"></div>'
+              f'<div class="{api_cls}"><span class="api-dot"></span>{api_txt}</div>'
+              f'</div>')
 
         st.markdown(h, unsafe_allow_html=True)
 
@@ -1038,7 +1041,67 @@ def _preview_panel():
     )
 
 # ─────────────────────────────────────────────────────────────
-if st.session_state.page == "home":         page_home()
-elif st.session_state.page == "context":    page_context()
-elif st.session_state.page == "generating": page_generating()
-elif st.session_state.page == "view_doc":   page_view_doc()
+def page_notion_library():
+    """Fetch all published docs from Notion DB and display them."""
+
+    # ── Header ────────────────────────────────────────────────
+    c_back, c_title = st.columns([1, 8])
+    with c_back:
+        if st.button("← Home", key="lib_back", type="secondary"):
+            st.session_state.page = "home"; st.rerun()
+    with c_title:
+        st.markdown('<div style="font-size:1.5rem;font-weight:800;color:#1e293b;padding-top:0.2rem">'
+                    '📚 Notion Library</div>', unsafe_allow_html=True)
+
+    st.markdown('<div style="color:#6b7280;font-size:0.85rem;margin-bottom:1.2rem">'
+                'All documents published to Notion from DocForge.</div>',
+                unsafe_allow_html=True)
+
+    # ── Fetch from Notion DB via API ──────────────────────────
+    with st.spinner("Fetching from Notion..."):
+        data, err = api("get", "/notion/library")
+
+    if err:
+        st.error(f"Could not fetch Notion library: {err}")
+        return
+
+    docs = data.get("docs", [])
+    if not docs:
+        st.markdown('<div style="text-align:center;padding:3rem;color:#9ca3af;">'
+                    '📭 No documents published yet.</div>', unsafe_allow_html=True)
+        return
+
+    # ── Render doc cards ──────────────────────────────────────
+    for doc in docs:
+        title    = doc.get("title", "Untitled")
+        industry = doc.get("industry", "")
+        version  = doc.get("version", "")
+        tags     = doc.get("tags", "")
+        url      = doc.get("url", "")
+        created  = doc.get("created_time", "")[:10] if doc.get("created_time") else ""
+        content  = doc.get("content", "")
+
+        with st.expander(f"📄  {title}  ·  {version}  ·  {industry}", expanded=False):
+            col1, col2, col3 = st.columns([3, 2, 2])
+            with col1:
+                st.markdown(f'<div style="font-size:0.78rem;color:#6b7280;">🏷 {tags}</div>',
+                            unsafe_allow_html=True)
+            with col2:
+                st.markdown(f'<div style="font-size:0.78rem;color:#6b7280;">📅 {created}</div>',
+                            unsafe_allow_html=True)
+            with col3:
+                if url:
+                    st.markdown(f'<a href="{url}" target="_blank" style="font-size:0.78rem;'
+                                f'color:#4f6ef7;font-weight:600;text-decoration:none;">'
+                                f'Open in Notion →</a>', unsafe_allow_html=True)
+            if content:
+                st.markdown("---")
+                st.markdown(content, unsafe_allow_html=False)
+
+
+# ─────────────────────────────────────────────────────────────
+if st.session_state.page == "home":             page_home()
+elif st.session_state.page == "context":        page_context()
+elif st.session_state.page == "generating":     page_generating()
+elif st.session_state.page == "view_doc":       page_view_doc()
+elif st.session_state.page == "notion_library": page_notion_library()

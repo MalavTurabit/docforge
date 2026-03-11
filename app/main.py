@@ -9,6 +9,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.routes.departments import router as dept_router
 from app.routes.templates import router as templates_router
 from app.routes.sessions import router as sessions_router
+from app.routes.cache_routes import router as cache_router
+from app.routes.notion_library import router as notion_library_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,7 +23,8 @@ app = FastAPI(title="DocForge")
 app.include_router(dept_router)
 app.include_router(templates_router)
 app.include_router(sessions_router)
-
+app.include_router(cache_router)
+app.include_router(notion_library_router)
 
 # ── 422 Wrong request body / missing fields ──────────────────
 @app.exception_handler(RequestValidationError)
@@ -89,3 +92,4 @@ def health():
     except Exception as e:
         logger.error("Health check failed: %s", str(e))
         return JSONResponse(status_code=500, content={"status": "error", "detail": str(e)})
+    
