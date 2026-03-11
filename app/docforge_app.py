@@ -375,11 +375,14 @@ DEPT_DISPLAY = {
     "dept_product_management":  ("🗂️","Product Management"),
     "dept_engineering":         ("⚙️","Engineering"),
     "dept_qa":                  ("🔍","QA"),
+    "dept_operations":          ("🔧","Operations"),
     "dept_support":             ("🎧","Support"),
+    "dept_marketing":           ("📣","Marketing"),
+    "dept_sales":               ("📈","Sales"),
     "dept_business_operations": ("🏢","Business Ops"),
-    "dept_legal__compliance":   ("⚖️","Legal & Compliance"),
-    "dept_it__security":         ("🖥️","IT & Security"),
-    "dept_sales__marketing":     ("📊","Sales & Marketing"),
+    "dept_legal":               ("⚖️","Legal & Compliance"),
+    "dept_it":                  ("🖥️","IT & Security"),
+    "dept_sales_marketing":     ("📊","Sales & Marketing"),
 }
 def dept_display(dept_id, raw_name=""):
     if dept_id in DEPT_DISPLAY: return DEPT_DISPLAY[dept_id]
@@ -503,15 +506,43 @@ def render_sidebar():
         if in_prog:
             h += '<div class="sb-hr"></div>'
             h += '<div class="sb-lbl">In Progress</div>'
+            st.markdown(h, unsafe_allow_html=True)
+            h = ""  # reset — already flushed
+
             for doc in in_prog[:4]:
-                name = doc.get("doc_name","").strip() or "Untitled"
-                meta = " · ".join(filter(None,[doc.get("dept_name",""), doc.get("created_at","")]))
-                h += (f'<div class="sb-doc">'
-                      f'<span class="sb-doc-icon">✏️</span>'
-                      f'<div style="min-width:0">'
-                      f'<div class="sb-doc-name">{name}</div>'
-                      f'<div class="sb-doc-meta">{meta}</div>'
-                      f'</div></div>')
+                name  = doc.get("doc_name","").strip() or "Untitled"
+                dept  = doc.get("dept_name","")
+                date  = doc.get("created_at","")
+                meta  = f"{dept} · {date}" if dept else date
+                is_cur = st.session_state.session_id == doc.get("session_id")
+                tile_bg = "rgba(99,102,241,0.18)" if is_cur else "transparent"
+                border  = "#6366f1" if is_cur else "transparent"
+                st.markdown(
+                    f'<div style="border-left:3px solid {border};background:{tile_bg};">',
+                    unsafe_allow_html=True
+                )
+                btn_label = f"✏️  {name}" + (f"\n{meta}" if meta else "")
+                if st.button(
+                    btn_label,
+                    key=f"resume_{doc['session_id']}",
+                    use_container_width=True,
+                ):
+                    # Restore session state and resume generation
+                    st.session_state.session_id    = doc["session_id"]
+                    st.session_state.template_name = doc.get("doc_name", "")
+                    st.session_state.dept_name     = doc.get("dept_name", "")
+                    st.session_state.current_section  = None
+                    st.session_state.preview_sections = []
+                    st.session_state.compiled_content = None
+                    st.session_state.all_done         = False
+                    st.session_state.need_fetch       = True   # trigger section fetch on load
+                    st.session_state.need_questions   = False
+                    st.session_state.questions        = []
+                    st.session_state.generated_content = None
+                    st.session_state.editing          = False
+                    st.session_state.page             = "generating"
+                    st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
 
         # ── 5. API pill footer ─────────────────────────────────
         # h += (f'<div style="margin-top:auto;padding:0.8rem 1.1rem 0.9rem">'
