@@ -18,6 +18,9 @@
 - [Architecture Decisions](#architecture-decisions)
 - [Known Bugs Fixed](#known-bugs-fixed)
 - [Environment Variables](#environment-variables)
+- [MongoDB Collections](#mongodb-collections)
+- [LangChain Usage](#langchain-usage)
+- [Development Notes](#development-notes)
 
 ---
 
@@ -41,11 +44,11 @@ DocForge lets users generate complete, professional documents (offer letters, pr
 |---|---|
 | Frontend | Streamlit (Python) |
 | Backend API | FastAPI (Python) |
-| AI / LLM | Azure OpenAI (GPT-4.1mini) via OpenAI SDK |
+| AI / LLM | Azure OpenAI (GPT-4) via LangChain (`langchain-openai`, `langchain-core`) |
 | Database | MongoDB |
 | PDF Generation | fpdf2 |
-| Notion Integration | Notion API |
-| Package Manager | uv / pip |
+| Notion Integration | Notion API (direct, no third-party bridge) |
+| Package Manager | uv |
 
 ---
 
@@ -54,18 +57,21 @@ DocForge lets users generate complete, professional documents (offer letters, pr
 ```
 docforge/
 ├── app/
-│   ├── main.py                  # FastAPI app entry point
+│   ├── main.py                  # FastAPI entry point + global exception handlers
+│   ├── config.py                # Pydantic settings — loads all env vars
 │   ├── db.py                    # MongoDB connection helper
 │   ├── routes/
-│   │   ├── sessions.py          # All session/document API endpoints
-│   │   ├── departments.py       # GET /departments/ — list all departments from MongoDB
-│   │   └── templates.py         # GET /templates/?dept_id= — list templates by department
+│   │   ├── sessions.py          # All session/document endpoints + Notion + PDF
+│   │   ├── departments.py       # GET /departments/
+│   │   └── templates.py         # GET /templates/?dept_id=
 │   └── services/
-│       ├── llm_provider.py      # Azure OpenAI LLM wrapper
+│       ├── llm_provider.py      # AzureChatOpenAI wrapper (LangChain)
 │       ├── question_service.py  # AI question generation
 │       └── section_service.py   # AI section writing + enhancement
 ├── docforge_app.py              # Streamlit frontend (entire UI)
 ├── pyproject.toml               # Dependencies
+├── .env                         # Secrets — never commit this
+├── .gitignore                   # Includes .env
 └── README.md
 ```
 
@@ -78,39 +84,40 @@ docforge/
 - Python 3.12+
 - MongoDB running locally (default: `mongodb://localhost:27017`)
 - Azure OpenAI API access (endpoint + key + deployment name)
-- `uv` package manager (recommended) or `pip`
+- Notion internal integration key
+- `uv` package manager
 
 ### 1. Clone and install dependencies
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/MalavTurabit/docforge.git
 cd docforge
-
-# Using uv (recommended)
 uv sync
-
-# Or using pip with venv
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
 ```
 
-### 2. Set environment variables
-
-Create a `.env` file in the project root:
+### 2. Create `.env` file
 
 ```env
+# Azure OpenAI
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
 AZURE_OPENAI_API_KEY=your-api-key-here
-AZURE_OPENAI_DEPLOYMENT=gpt-4.1mini          # your deployment name
+AZURE_OPENAI_DEPLOYMENT=gpt-4o
 AZURE_OPENAI_API_VERSION=2024-02-01
+
+# MongoDB
 MONGODB_URI=mongodb://localhost:27017
 MONGODB_DB=docforge
+
+# Notion
+NOTION_API_KEY=secret_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+NOTION_DATABASE_ID=31461ecb2bd28053910fe4d3ad65235b
 ```
+
+> ⚠️ Never commit `.env` to git. It is listed in `.gitignore`.
 
 ### 3. Seed document templates
 
-Make sure your MongoDB `docforge` database has templates seeded in the `document_templates` collection. Each template follows this structure:
+Make sure your MongoDB `docforge` database has templates in the `document_templates` collection:
 
 ```json
 {
@@ -125,10 +132,7 @@ Make sure your MongoDB `docforge` database has templates seeded in the `document
         "description": "Personal and role information for the candidate"
       }
     ],
-    "generation_rules": {
-      "tone": "professional",
-      "format": "formal"
-    },
+    "generation_rules": { "tone": "professional", "format": "formal" },
     "terminology_rules": {}
   }
 }
@@ -138,90 +142,67 @@ Make sure your MongoDB `docforge` database has templates seeded in the `document
 
 ## Running the App
 
-You need **two terminals** — one for the API, one for the UI.
+Run both commands from inside the `docforge/` directory.
 
-### Terminal 1 — Start the FastAPI backend
-
-```bash
-# Using uv
-uv run uvicorn app.main:app --reload --port 8000
-
-# Or with activated venv
-uvicorn app.main:app --reload --port 8000
-```
-
-API will be available at: `http://localhost:8000`
-Interactive API docs: `http://localhost:8000/docs`
-
-### Terminal 2 — Start the Streamlit frontend
+### Terminal 1 — FastAPI backend
 
 ```bash
-# Using uv
-uv run streamlit run docforge_app.py --server.port 8501
-
-# Or with activated venv
-streamlit run docforge_app.py --server.port 8501
+cd docforge
+uv run uvicorn app.main:app --reload
 ```
 
-App will be available at: `http://localhost:8501`
+API: `http://localhost:8000`
+Docs: `http://localhost:8000/docs`
+
+### Terminal 2 — Streamlit frontend
+
+```bash
+cd docforge
+uv run streamlit run app/docforge_app.py --server.port 8501
+```
+
+App: `http://localhost:8501`
 
 ---
 
 ## How It Works — User Flow
 
 ```
-Select Department → Select Template → Company Info → Generate Sections → Compile → Download
+Select Department → Select Template → Company Info → Generate Sections → Compile → Download / Publish
 ```
 
 ### Step 1 — Select Department
 Choose from HR, Finance, Product Management, Engineering, QA, Legal & Compliance, Sales & Marketing, Business Ops, IT & Security, Support.
 
 ### Step 2 — Select Template
-Templates are filtered by department. Each template defines the document structure (sections, generation rules, terminology).
+Templates are filtered by department. Each defines the document structure (sections, generation rules, terminology).
 
 ### Step 3 — Company Info
-Fill in 7 fields:
-- Company name
-- Product name + description
-- Industry vertical
-- Company stage (seed / series A / growth / etc.)
-- Target customer
-- Key problem solved
-
-This context is passed to the AI for every section so content is accurate and company-specific.
+Fill in 6 fields: company name, product name + description, industry vertical, company stage, target customer, key problem solved. This context is injected into every AI call.
 
 ### Step 4 — Generate Sections (one by one)
-
 For each section:
-1. AI generates **2–5 contextual questions** (not generic — specific to the document type and section)
+1. AI generates 2–5 contextual questions specific to the section and document type
 2. User answers the questions
 3. AI writes the section using answers + company context + template rules
-4. User can **Edit** or **Approve** the section
-5. Approved sections appear in the **live preview panel** on the right
+4. User can **Edit** or **Approve** — approved sections appear in the live preview panel
 
 ### Step 5 — Compile & Download
-
 Once all sections are approved:
-- Click **Compile Document** to merge all sections
-- **Download PDF** — professionally formatted with title, header on each page, markdown tables, bullet points
-- **Publish to Notion** — push the document to a Notion database
+- **Compile Document** — merges all sections into the final document
+- **Download PDF** — professionally formatted with title page, running header, markdown tables, bullet points
+- **Publish to Notion** — one-click, no configuration needed
 
-### Step 6 — Enhance Sections (post-generation)
+### Step 6 — Enhance Sections
+After compilation, the **✨ Enhance a Section** panel lets you:
+- Pick any section from a dropdown
+- Choose a quick preset (Make longer, More formal, Add table, Add examples, etc.)
+- Or type a custom instruction
+- Review original vs enhanced side-by-side
+- Accept (triggers re-compile) or Discard
 
-After compilation, use the **✨ Enhance a Section** panel to:
-- Select any section from a dropdown
-- Choose a quick preset:
-  - ✦ Make it longer
-  - ⚡ More formal
-  - ✂ Make it concise
-  - 📋 Add bullet points
-  - 📊 Add a table
-  - 💡 Add examples
-  - 🔍 More specific
-  - 🌐 Industry language
-- Or write a **custom instruction** (e.g. *"Add a risk mitigation table and use executive tone"*)
-- Review **side-by-side** original vs enhanced
-- **Accept & Save** (updates the section, requires re-compile) or **Discard**
+### Step 7 — Library
+All compiled documents are saved in the sidebar **Library**. Click any to open it and re-download PDF or re-publish to Notion.
 
 ---
 
@@ -229,49 +210,58 @@ After compilation, use the **✨ Enhance a Section** panel to:
 
 ### Document Generation
 - Section-by-section guided workflow
-- AI questions are document-type aware (no irrelevant product/company questions asked)
-- Questions capped at 2–3 per simple section, max 5 for complex ones
+- AI questions are document-type aware — never asks for info already provided in company context
+- Questions capped at 2–3 for simple sections, max 5 for complex ones
 - Full company context injected into every generation call
 - Live document preview updates as sections are approved
-
-### Document Preview
-- Sticky right-panel preview showing all approved sections in real time
-- Document title shown at top of preview
-- Markdown rendering: bold, tables, bullet lists
-- Approved (green) vs generated (amber) status chips per section
 
 ### PDF Generation
 - Professional PDF with document title as large heading on page 1
 - Running header on every page: `DocForge | Document Title`
-- Handles markdown: headings (H1/H2/H3), bullet lists, numbered lists, tables, horizontal rules
-- Unicode-safe: rupee sign, curly quotes, em dashes, bullets all handled cleanly
-- `safe_multicell()` prevents FPDF "not enough horizontal space" crash on long words
-- Filename uses the document title (e.g. `Employment Offer Letter.pdf`)
+- Full markdown support: H1/H2/H3, bullet lists, numbered lists, tables, horizontal rules
+- Unicode-safe: rupee `₹`, curly quotes, em dashes, bullets all handled
+- `safe_multicell()` prevents FPDF crash on long unbroken words
+- Filename uses the document title (e.g. `Employment_Offer_Letter.pdf`)
+
+### Notion Integration
+- **Direct Notion API** — no third-party bridge (Make.com removed)
+- Each section becomes a **Heading 2 + paragraph blocks** in Notion
+- Markdown tables → proper Notion `table` blocks with headers
+- Bullet lines → `bulleted_list_item` blocks
+- Numbered lists → `numbered_list_item` blocks
+- Bold `**text**` → Notion bold annotations
+- **Rate limiting**: 0.4s sleep between API calls (~2.5 req/s, under the 3 req/s cap)
+- **Batching**: 95 blocks per request (Notion hard limit is 100)
+- **Retry logic**: exponential backoff up to 5× on 429 Too Many Requests
+- **2000 char limit**: text chunked at 1950 chars on word boundaries
+- **Version tracking**: `v1`, `v2`... auto-incremented per session in MongoDB
+- After publish — shows **"Open in Notion →"** direct link to the exact page created
+- Database fields populated: Name, industry, version, tags
 
 ### AI Enhancement
 - Any approved section can be re-enhanced post-generation
-- Enhancement agent receives: section metadata, current content, company context, generation rules, user instruction
+- 8 quick presets: Make longer, More formal, Make concise, Add bullets, Add table, Add examples, More specific, Industry language
+- Free-form custom prompt also supported
 - Side-by-side original vs enhanced diff before committing
-- Accepting an enhancement clears the compiled document (forces re-compile to include new content)
+- Accepting clears compiled content → forces re-compile
 
-### Notion Integration
-- Publish compiled document to any Notion database
-- Document title passed as the Notion page title
+### Sidebar Library
+- All compiled documents listed under **Library** section
+- Real `st.button` widgets styled as doc tiles — no hidden button hacks
+- Each tile shows doc title + department + date
+- Click → opens document view with Download PDF + Publish to Notion
 
-### Sidebar
-- Dark navy sidebar with DocForge branding
-- Progress tracker (Department → Template → Company Info → Generate) with live done/active states
-- Generated Docs history — click any to view
-- In Progress docs list
-- API connection status pill
+### Exception Handling
+- `main.py` has three global handlers:
+  - **422** `RequestValidationError` — shows exactly which field failed
+  - **HTTP errors** — clean JSON with status + detail
+  - **Unhandled exceptions** — returns error type + message + last 5 lines of traceback
 
 ---
 
 ## API Reference
 
-### Departments — `/departments/`
-
-Returns all departments from the `Departments` MongoDB collection.
+### Departments — `GET /departments/`
 
 ```http
 GET /departments/
@@ -283,23 +273,16 @@ GET /departments/
 ]
 ```
 
----
-
-### Templates — `/templates/`
-
-Returns all document templates filtered by department.
+### Templates — `GET /templates/?dept_id=`
 
 ```http
 GET /templates/?dept_id=dept_hr
 ```
 ```json
 [
-  { "id": "tpl_offer_letter", "label": "Employment Offer Letter" },
-  { "id": "tpl_appraisal",    "label": "Performance Appraisal" }
+  { "id": "tpl_offer_letter", "label": "Employment Offer Letter" }
 ]
 ```
-
----
 
 ### Sessions — `/sessions/`
 
@@ -314,77 +297,25 @@ GET /templates/?dept_id=dept_hr
 | `GET` | `/sessions/{session_id}/sections` | Get all section contents for a session |
 | `POST` | `/sessions/{session_id}/enhance_section` | AI-enhance a section with a custom prompt |
 | `POST` | `/sessions/{session_id}/compile` | Compile all approved sections into final doc |
-| `GET` | `/sessions/{session_id}/download_pdf` | Download the compiled doc as PDF |
+| `GET` | `/sessions/{session_id}/download_pdf` | Download compiled doc as PDF |
 | `POST` | `/sessions/{session_id}/publish_notion` | Publish compiled doc to Notion |
 
-### Request/Response Examples
+### Publish to Notion — Request/Response
 
-#### Create Session
 ```http
-POST /sessions/
-Content-Type: application/json
-
-{ "template_id": "tpl_offer_letter" }
-```
-```json
-{ "session_id": "sess_a1b2c3d4", "total_sections": 6 }
-```
-
-#### Generate Questions
-```http
-POST /sessions/sess_a1b2c3d4/generate_questions
-Content-Type: application/json
-
-{
-  "section_id": "candidate_details",
-  "company_context": {
-    "company_name": "Treespay",
-    "product_name": "TreesPay",
-    "industry_vertical": "Fintech"
-  }
-}
-```
-```json
-{
-  "questions": [
-    { "question_id": "q1", "question_text": "What is the candidate's full name?" },
-    { "question_id": "q2", "question_text": "What role are they being offered?" }
-  ]
-}
-```
-
-#### Enhance Section
-```http
-POST /sessions/sess_a1b2c3d4/enhance_section
-Content-Type: application/json
-
-{
-  "section_id": "candidate_details",
-  "enhance_prompt": "Make this section more formal and add a responsibilities table",
-  "company_context": { "company_name": "Treespay" }
-}
-```
-```json
-{
-  "section_id": "candidate_details",
-  "section_title": "Candidate Details",
-  "original": "...original content...",
-  "enhanced": "...AI enhanced content..."
-}
-```
-
-#### Compile Document
-```http
-POST /sessions/sess_a1b2c3d4/compile
+POST /sessions/sess_a1b2c3d4/publish_notion
 Content-Type: application/json
 
 { "doc_title": "Employment Offer Letter" }
 ```
 ```json
 {
-  "message": "Document compiled",
-  "document_id": "doc_e5f6g7h8",
-  "doc_title": "Employment Offer Letter"
+  "message":    "Published to Notion successfully",
+  "doc_title":  "Employment Offer Letter",
+  "version":    "v1",
+  "industry":   "Human Resources",
+  "tags":       "Employment Offer Letter",
+  "notion_url": "https://www.notion.so/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 }
 ```
 
@@ -392,55 +323,69 @@ Content-Type: application/json
 
 ## Key Files
 
+### `app/main.py`
+FastAPI entry point. Registers all routers. Three global exception handlers: `RequestValidationError`, `StarletteHTTPException`, `Exception`.
+
 ### `app/routes/sessions.py`
 All document session logic. Contains:
 - All 11 API endpoints
-- `DocForgePDF` class — fpdf2 subclass with custom header
-- `clean()` — unicode sanitizer (handles •, ₹, —, curly quotes, etc.)
-- `safe_multicell()` — crash-proof text renderer for FPDF
-- `render_markdown_to_pdf()` — full markdown-to-PDF converter
+- **Notion helpers**: `_notion_request()`, `_chunk_text()`, `_make_rich_text()`, `_parse_table()`, `_content_to_blocks()`, `_append_blocks()`
+- **PDF helpers**: `DocForgePDF`, `clean()`, `safe_multicell()`, `render_markdown_to_pdf()`
+- Rate limiting, retry backoff, block batching for Notion API
+
+### `app/routes/departments.py`
+`GET /departments/` — reads from `Departments` MongoDB collection.
+
+### `app/routes/templates.py`
+`GET /templates/?dept_id=` — filters `document_templates` by department.
+
+### `app/services/llm_provider.py`
+Thin LangChain wrapper around `AzureChatOpenAI`. Uses `ainvoke()` for async calls. LangChain is used **only as an Azure OpenAI client** — no chains, no agents, no memory.
 
 ### `app/services/question_service.py`
-- `generate_questions(section_json, company_context)` — generates 2–5 contextual questions
-- Prompt explicitly lists all known company info and instructs the AI NOT to ask about those
-- Uses section title to determine appropriate question type
+`generate_questions()` — generates 2–5 contextual questions per section. Prompt explicitly lists known company info and instructs AI not to ask about it again.
 
 ### `app/services/section_service.py`
-- `generate_section(section_json, qa_pairs, generation_rules, terminology_rules)` — writes section content
-- `enhance_section(section_json, current_content, enhance_prompt, company_context, generation_rules)` — rewrites section per user instruction
+- `generate_section()` — writes section content from Q&A + company context
+- `enhance_section()` — rewrites section per user instruction
 
-### `docforge_app.py`
-Full Streamlit frontend (~950 lines). Key functions:
-- `render_sidebar()` — dark navy sidebar with progress + history
-- `page_home()` — department + template selection
+### `app/docforge_app.py`
+Full Streamlit frontend (~1000 lines). Key functions:
+- `render_sidebar()` — dark navy sidebar, Library with real buttons, API status pill
+- `page_home()` — department + template selection tiles
 - `page_context()` — company info form
 - `page_generating()` — section-by-section generation flow
-- `_questions_form()` — renders AI questions as a form
+- `_questions_form()` — renders AI questions as a Streamlit form
 - `_approve_panel()` — approve/edit generated section
-- `_done_left()` — compile, download, publish panel
-- `_enhance_panel()` — full AI enhancement UI with presets + custom prompt + diff
-- `_preview_panel()` — live document preview (single HTML string for correct rendering)
-- `render_markdown()` — converts markdown to HTML for preview
-- `page_view_doc()` — view previously generated document
+- `_done_left()` — compile, download, publish, enhance panel
+- `_enhance_panel()` — 8 presets + custom prompt + side-by-side diff
+- `_preview_panel()` — live sticky preview (single HTML string)
+- `page_view_doc()` — view/download/publish any Library document
 
 ---
 
 ## Architecture Decisions
 
 ### Why single HTML string for preview?
-Streamlit wraps each `st.markdown()` call in its own `<div>`. If you split a container's open and close tags across two `st.markdown()` calls, the closing tag renders as a separate visible element. The entire preview is built as one Python string and rendered in a single `st.markdown()` call.
+Streamlit wraps each `st.markdown()` in its own `<div>`. Splitting open/close HTML tags across two calls causes the closing tag to render as a visible element. Everything is built as one string in a single `st.markdown()` call.
 
-### Why CSS `order` for sidebar button positioning?
-Streamlit renders widgets (buttons) before HTML in the same block — you cannot reorder them with Python code. CSS `flex order` property is used to visually place the DocForge brand title (order:1) above the New Document button (order:2), even though the button is technically rendered first in the DOM.
+### Why real `st.button` for Library tiles instead of hidden buttons?
+Hidden buttons (zero-width space label + `display:none` CSS) always leaked a visible white box in the sidebar. Replaced with real `st.button` widgets styled to look like doc tiles — zero leaking, fully clickable.
 
-### Why `clean()` runs on the entire document before PDF rendering?
-FPDF with Helvetica (latin-1 encoding) crashes on any character outside the latin-1 range. Running `clean()` on the full content string upfront (before line-by-line processing) is a safety net — even if a single character slips through the replacement map, the `encode("latin-1", errors="ignore")` fallback will drop it silently rather than crashing.
+### Why not use LangChain chains?
+DocForge's AI flow is single prompt → single response for every operation. Chains are useful for RAG, agents, or multi-step LLM pipelines — none of which we need. All sequencing and context injection is done manually in Python. LangChain is used only for the `AzureChatOpenAI` async client.
 
-### Why `safe_multicell()` wraps text before `multi_cell()`?
-FPDF raises `FPDFException: Not enough horizontal space to render a single character` when a word is longer than the available column width (e.g. long URLs, camelCase identifiers). `textwrap.wrap(break_long_words=True)` pre-wraps the text so no word exceeds the column width before it reaches FPDF.
+### Why direct Notion API instead of Make.com?
+Make.com free plan has 1000 operations/month and adds latency. Direct Notion API is faster, free, handles all block types natively, and gives us the exact page URL back. The 3 req/s rate limit is handled with 0.4s sleeps + exponential backoff.
 
-### Why async endpoints for question/section generation?
-Azure OpenAI calls are I/O-bound and can take 5–30 seconds. FastAPI's `async def` endpoints run on the event loop without blocking the thread pool, allowing other requests to be served concurrently. Earlier sync endpoints were crashing with `asyncio.get_event_loop().run_until_complete()` inside FastAPI's thread pool — converting to `async def` + `await` fixed this.
+### Why `clean()` runs on entire document before PDF rendering?
+FPDF with Helvetica (latin-1) crashes on any character outside latin-1 range. Running `clean()` upfront on the full content string is a safety net — `encode("latin-1", errors="ignore")` drops anything that slips through.
+
+### Why `safe_multicell()` wraps text?
+FPDF raises `FPDFException: Not enough horizontal space` when a word exceeds column width. `textwrap.wrap(break_long_words=True)` pre-wraps so no word hits FPDF raw.
+
+### Why async endpoints for AI calls?
+Azure OpenAI calls are I/O-bound and take 5–30 seconds. `async def` + `await` lets FastAPI serve other requests concurrently. Sync endpoints with `run_until_complete()` crashed inside FastAPI's thread pool.
 
 ---
 
@@ -448,17 +393,19 @@ Azure OpenAI calls are I/O-bound and can take 5–30 seconds. FastAPI's `async d
 
 | Bug | Root Cause | Fix |
 |---|---|---|
-| AsyncIO crash on generate | `run_until_complete()` called inside FastAPI thread pool | Changed endpoints to `async def`, used `await` directly |
-| Dict mutation on template | `generation_rules = template_json.get(...)` returned reference, mutations persisted | Used `dict(...)` copy before modifying |
-| PDF crash — `Not enough horizontal space` | Long unbroken words exceeded FPDF column width | Added `safe_multicell()` with `textwrap.wrap(break_long_words=True)` |
-| PDF crash — `UnicodeEncodeError: '\u2022'` | Bullet `•` passed to Helvetica font which is latin-1 only | Added `clean()` to sanitize entire content before rendering; replaced `•` with `-` |
-| PDF `output()` wrote nothing | `fpdf2` `output()` returns bytes — old code passed a `BytesIO` as argument | `pdf_bytes = pdf.output()` then `BytesIO(pdf_bytes)` |
-| Preview content renders outside container | Multiple `st.markdown()` calls split open/close HTML divs | Built entire preview as one HTML string in a single `st.markdown()` call |
-| Sidebar button order wrong | Streamlit renders widgets before HTML regardless of call order | Used CSS `flex order` property to visually reorder elements |
-| `open_sess_xxx` text in sidebar | Hidden buttons used session ID as label text | Used zero-width space `\u200b` as label + `display: none` CSS |
-| Extra container above enhance panel | Orphaned `st.markdown('</div>')` rendered as visible Streamlit element | Merged all enhance header HTML into single `st.markdown()` call |
-| Template None check crash | `approve_section` accessed `template["sections"]` without None guard | Added `if not template: raise HTTPException(404)` |
-| Q&A None AttributeError | `qa_doc.get(...)` called when `qa_doc` was None | Added `if qa_doc` guard before all attribute access |
+| AsyncIO crash on generate | `run_until_complete()` inside FastAPI thread pool | Changed to `async def` + `await` |
+| Dict mutation on template | `generation_rules = template_json.get(...)` returned reference | Used `dict(...)` copy |
+| PDF crash — not enough horizontal space | Long unbroken words exceeded FPDF column width | `safe_multicell()` with `textwrap.wrap(break_long_words=True)` |
+| PDF crash — `UnicodeEncodeError: '\u2022'` | Bullet `•` outside latin-1 range | `clean()` on full content before rendering |
+| PDF `output()` wrote nothing | `fpdf2` `output()` returns bytes, not writes to file | `pdf_bytes = pdf.output()` then `BytesIO(pdf_bytes)` |
+| Preview renders outside container | Split open/close HTML divs across two `st.markdown()` calls | Single `st.markdown()` call with full HTML string |
+| `open_sess_xxx` text in sidebar | Hidden buttons used session ID as visible label | Replaced with real styled `st.button` widgets |
+| Blank container below API pill | Hidden `\u200b` button leaked white box despite CSS | Removed hidden buttons entirely |
+| Extra container above enhance panel | Orphaned `st.markdown('</div>')` rendered as element | Merged into single `st.markdown()` call |
+| Template None check crash | `template["sections"]` accessed without None guard | Added `if not template: raise HTTPException(404)` |
+| Q&A None AttributeError | `qa_doc.get(...)` on None object | Added `if qa_doc` guard |
+| `notion_database_id` validation error | `PublishRequest` had it as required field | Removed field — hardcoded in config |
+| GitHub push blocked | Notion API key hardcoded in `sessions.py` | Moved to `.env` + `config.py` via pydantic-settings |
 
 ---
 
@@ -468,10 +415,12 @@ Azure OpenAI calls are I/O-bound and can take 5–30 seconds. FastAPI's `async d
 |---|---|---|
 | `AZURE_OPENAI_ENDPOINT` | Azure OpenAI resource endpoint | `https://myresource.openai.azure.com/` |
 | `AZURE_OPENAI_API_KEY` | Azure OpenAI API key | `abc123...` |
-| `AZURE_OPENAI_DEPLOYMENT` | Deployment name in Azure | `gpt-4.1mini` |
+| `AZURE_OPENAI_DEPLOYMENT` | Deployment name in Azure | `gpt-4o` |
 | `AZURE_OPENAI_API_VERSION` | API version | `2024-02-01` |
 | `MONGODB_URI` | MongoDB connection string | `mongodb://localhost:27017` |
 | `MONGODB_DB` | Database name | `docforge` |
+| `NOTION_API_KEY` | Notion internal integration secret | `secret_xxx...` |
+| `NOTION_DATABASE_ID` | Notion liberary database ID | `31461ecb2bd28053910fe4d3ad65235b` |
 
 ---
 
@@ -479,24 +428,43 @@ Azure OpenAI calls are I/O-bound and can take 5–30 seconds. FastAPI's `async d
 
 | Collection | Purpose |
 |---|---|
-| `depertments` | List of all defined Departments |
+| `Departments` | Department list (dept_id, name) |
 | `document_templates` | Template definitions (sections, generation rules, terminology) |
 | `doc_sessions` | Active document sessions (current section index, status) |
 | `doc_sections` | Section content per session (content, status: generated/approved) |
 | `session_questions` | AI-generated questions and user answers per session |
 | `generated_documents` | Compiled final documents with title and full content |
+| `notion_publishes` | Publish history — session_id, version, notion_page_id, notion_url |
 
 ---
 
-## Contributing / Development Notes
+## LangChain Usage
 
-- The frontend (`docforge_app.py`) runs entirely stateless per page refresh — all state lives in `st.session_state`
-- API timeout is set to **90 seconds** to handle slow LLM responses
-- The preview panel is **sticky** (`position: sticky; top: 1rem`) so it stays visible while scrolling through the left panel
-- PDF filenames use the document title with non-alphanumeric characters replaced by `_`
-- Enhancement accepting a section clears `compiled_content` in session state to force re-compilation with the new content
-- The `upsert_preview()` helper updates an existing section in the preview list in-place to avoid duplicates
+LangChain is used **only in `llm_provider.py`** as a thin client wrapper:
+
+```python
+from langchain_openai import AzureChatOpenAI
+from langchain_core.messages import HumanMessage
+
+self.llm = AzureChatOpenAI(...)
+response = await self.llm.ainvoke([HumanMessage(content=prompt)])
+```
+
+**Not used**: chains, agents, memory, RAG, tools, callbacks, or any other LangChain feature. All prompt construction, context injection, and sequencing is done manually in Python.
 
 ---
 
-*Built with FastAPI · Streamlit · MongoDB · Azure OpenAI · fpdf2*
+## Development Notes
+
+- Run both `uvicorn` and `streamlit` from inside the `docforge/` directory
+- API timeout is **90 seconds** to handle slow LLM responses
+- The preview panel is sticky (`position: sticky; top: 1rem`)
+- PDF filenames replace non-alphanumeric chars with `_`
+- Accepting an enhancement clears `compiled_content` in session state — user must re-compile
+- `upsert_preview()` updates sections in-place to avoid duplicates in the preview list
+- Notion `notion_publishes` collection tracks publish count per session for version numbers
+- Secrets must never be hardcoded — GitHub push protection will block the push
+
+---
+
+*Built with FastAPI · Streamlit · MongoDB · Azure OpenAI · LangChain · fpdf2 · Notion API*
