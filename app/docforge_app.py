@@ -548,10 +548,10 @@ def render_sidebar():
                 st.markdown('</div>', unsafe_allow_html=True)
 
         # ── 5. API pill footer ─────────────────────────────────
-        h += (f'<div style="margin-top:auto;padding:0.8rem 1.1rem 0.9rem">'
-              f'<div class="sb-hr" style="margin:0 0 0.7rem"></div>'
-              f'<div class="{api_cls}"><span class="api-dot"></span>{api_txt}</div>'
-              f'</div>')
+        # h += (f'<div style="margin-top:auto;padding:0.8rem 1.1rem 0.9rem">'
+        #       f'<div class="sb-hr" style="margin:0 0 0.7rem"></div>'
+        #       f'<div class="{api_cls}"><span class="api-dot"></span>{api_txt}</div>'
+        #       f'</div>')
 
         st.markdown(h, unsafe_allow_html=True)
 
