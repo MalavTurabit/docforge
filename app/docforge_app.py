@@ -375,7 +375,6 @@ DEPT_DISPLAY = {
     "dept_product_management":  ("🗂️","Product Management"),
     "dept_engineering":         ("⚙️","Engineering"),
     "dept_qa":                  ("🔍","QA"),
-    "dept_operations":          ("🔧","Operations"),
     "dept_support":             ("🎧","Support"),
     "dept_sales__marketing":    ("📈","Sales"),
     "dept_business_operations": ("🏢","Business Ops"),
