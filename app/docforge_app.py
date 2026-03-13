@@ -376,7 +376,6 @@ DEPT_DISPLAY = {
     "dept_engineering":         ("⚙️","Engineering"),
     "dept_qa":                  ("🔍","QA"),
     "dept_support":             ("🎧","Support"),
-    "dept_sales__marketing":    ("📈","Sales"),
     "dept_business_operations": ("🏢","Business Ops"),
     "dept_legal__compliance":    ("⚖️","Legal & Compliance"),
     "dept_it__security":         ("🖥️","IT & Security"),
@@ -755,7 +754,11 @@ def _questions_form():
     sess=st.session_state.session_id; section=st.session_state.current_section
     sec_id=section["id"]; idx=st.session_state.current_index; total=st.session_state.total_sections
     pct=int((idx/total)*100) if total else 0
-    st.markdown(f'<div class="sec-badge sbb">Section {idx+1} of {total}</div>'
+    doc_title = st.session_state.get("template_name", "")
+    st.markdown(f'<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.45rem;">'
+                f'<div class="sec-badge sbb" style="margin-bottom:0;">Section {idx+1} of {total}</div>'
+                f'{"<div style=\"font-size:0.63rem;font-weight:600;color:#9ca3af;letter-spacing:0.04em;text-transform:uppercase;\">·</div><div style=\"font-size:0.63rem;font-weight:700;color:#6b7280;letter-spacing:0.04em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px;\">"+doc_title+"</div>" if doc_title else ""}'
+                f'</div>'
                 f'<div class="sec-title">{section.get("title","")}</div>'
                 f'<div class="prog-wrap"><div class="prog-bg"><div class="prog-fill" style="width:{pct}%"></div></div>'
                 f'<div class="prog-txt">{pct}% complete</div></div>', unsafe_allow_html=True)
@@ -783,7 +786,11 @@ def _approve_panel():
     section=st.session_state.current_section; sec_id=section["id"]
     idx=st.session_state.current_index; total=st.session_state.total_sections
     pct=int((idx/total)*100) if total else 0
-    st.markdown(f'<div class="sec-badge sbg">✓ Generated</div>'
+    doc_title = st.session_state.get("template_name", "")
+    st.markdown(f'<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.45rem;">'
+                f'<div class="sec-badge sbg" style="margin-bottom:0;">✓ Generated</div>'
+                f'{"<div style=\"font-size:0.63rem;font-weight:600;color:#9ca3af;letter-spacing:0.04em;text-transform:uppercase;\">·</div><div style=\"font-size:0.63rem;font-weight:700;color:#6b7280;letter-spacing:0.04em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px;\">"+doc_title+"</div>" if doc_title else ""}'
+                f'</div>'
                 f'<div class="sec-title">{section.get("title","")}</div>'
                 f'<div class="prog-wrap"><div class="prog-bg"><div class="prog-fill" style="width:{pct}%"></div></div>'
                 f'<div class="prog-txt">{pct}% complete</div></div>'
