@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     AZURE_LLM_API_VERSION: str
     AZURE_LLM_ENDPOINT: str
     AZURE_LLM_DEPLOYMENT_41_MINI: str
+    AZURE_OPENAI_EMB_KEY: str
+    AZURE_OPENAI_EMB_ENDPOINT: str
+    AZURE_OPENAI_EMB_API_VERSION: str
+    AZURE_OPENAI_EMB_DEPLOYMENT: str
     # Notion
     notion_api_key: str = ""
     notion_database_id: str = ""

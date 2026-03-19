@@ -11,6 +11,9 @@ from app.routes.templates import router as templates_router
 from app.routes.sessions import router as sessions_router
 from app.routes.cache_routes import router as cache_router
 from app.routes.notion_library import router as notion_library_router
+from app.routes.rag import router as rag_router
+from app.routes.sync import router as sync_router
+from app.rag_config import create_collection_if_not_exists
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,6 +28,18 @@ app.include_router(templates_router)
 app.include_router(sessions_router)
 app.include_router(cache_router)
 app.include_router(notion_library_router)
+app.include_router(rag_router)
+app.include_router(sync_router)
+
+
+@app.on_event("startup")
+def startup():
+    try:
+        create_collection_if_not_exists()
+        logger.info("Milvus collection ready ✓")
+    except Exception as e:
+        logger.error("Milvus startup error: %s", str(e))
+
 
 # ── 422 Wrong request body / missing fields ──────────────────
 @app.exception_handler(RequestValidationError)
@@ -92,4 +107,3 @@ def health():
     except Exception as e:
         logger.error("Health check failed: %s", str(e))
         return JSONResponse(status_code=500, content={"status": "error", "detail": str(e)})
-    

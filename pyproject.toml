@@ -16,9 +16,11 @@ dependencies = [
     "openai>=2.21.0",
     "pydantic>=2.12.5",
     "pydantic-settings>=2.13.0",
+    "pymilvus[milvus-lite]==2.5.1",
     "pymongo>=4.16.0",
     "python-dotenv>=1.2.1",
     "redis>=7.3.0",
+    "setuptools>=82.0.1",
     "streamlit>=1.54.0",
     "uvicorn>=0.41.0",
 ]

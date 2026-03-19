@@ -30,7 +30,9 @@ section[data-testid="stSidebar"] {
     background: #0d1f3c !important;
     min-width: 240px !important;
     max-width: 240px !important;
+    padding-top: 5vh !important;
 }
+[data-testid="stSidebarHeader"] { display: none !important; }
 section[data-testid="stSidebar"] > div:first-child {
     background: #0d1f3c !important;
     padding: 0 !important;
@@ -365,6 +367,30 @@ section[data-testid="stSidebar"] > div:first-child {
 }
 .enh-col-body.new { background: #f5f7ff; border-color: #c7d2fe; color: #1f2937; }
 .enh-actions { display: flex; gap: 0.6rem; margin-top: 0.75rem; }
+
+/* ── Kill Streamlit's default sidebar top padding ── */
+[data-testid="stSidebar"] > div:first-child > div:first-child > div:first-child {
+    padding-top: 0 !important;
+    margin-top: 0 !important;
+}
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div:first-child {
+    margin-top: -1rem !important;
+}
+/* ── App switcher ── */
+.switcher-label {
+    font-size: 0.56rem; font-weight: 700; letter-spacing: 0.1em;
+    text-transform: uppercase; color: rgba(255,255,255,0.28);
+    padding: 0.6rem 0.85rem 0.2rem; display: block;
+}
+[data-testid="stSidebar"] [data-testid="stSelectbox"] > div > div {
+    background: rgba(255,255,255,0.07) !important;
+    border: 1px solid rgba(255,255,255,0.12) !important;
+    border-radius: 8px !important;
+    color: rgba(255,255,255,0.85) !important;
+    font-size: 0.8rem !important; font-weight: 600 !important;
+    min-height: 36px !important;
+}
+[data-testid="stSidebar"] [data-testid="stSelectbox"] svg { fill: rgba(255,255,255,0.5) !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -376,6 +402,7 @@ DEPT_DISPLAY = {
     "dept_engineering":         ("⚙️","Engineering"),
     "dept_qa":                  ("🔍","QA"),
     "dept_support":             ("🎧","Support"),
+    "dept_sales__marketing":    ("📈","Sales"),
     "dept_business_operations": ("🏢","Business Ops"),
     "dept_legal__compliance":    ("⚖️","Legal & Compliance"),
     "dept_it__security":         ("🖥️","IT & Security"),
@@ -478,6 +505,21 @@ def render_sidebar():
             (3,"Company Info", page=="context",                                  page in ("generating","view_doc")),
             (4,"Generate",     page in ("generating","view_doc"),                False),
         ]
+
+        # ── 0. App switcher ───────────────────────────────────
+        st.markdown('<div class="switcher-label" style="padding-bottom: 1rem; padding-top: 1rem;">Change App</div>', unsafe_allow_html=True)
+        st.markdown('<div>', unsafe_allow_html=True)
+        app_choice = st.selectbox(
+            "", ["📋  DocForge", "🔍  CiteRAG Lab"],
+            index=0, key="app_switcher",
+            label_visibility="collapsed"
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+        if app_choice == "🔍  CiteRAG Lab":
+            st.markdown(
+                '<meta http-equiv="refresh" content="0;url=http://localhost:8502">',
+                unsafe_allow_html=True)
+            st.stop()
 
         # ── 1. Brand ──────────────────────────────────────────
         st.markdown('<div class="sb-brand">📋 Doc<span class="ac">Forge</span></div>',
@@ -584,7 +626,6 @@ def render_sidebar():
                     st.rerun()
                 st.markdown('</div>', unsafe_allow_html=True)
 
-render_sidebar()
 
 # ─────────────────────────────────────────────────────────────
 # PAGES
@@ -754,11 +795,7 @@ def _questions_form():
     sess=st.session_state.session_id; section=st.session_state.current_section
     sec_id=section["id"]; idx=st.session_state.current_index; total=st.session_state.total_sections
     pct=int((idx/total)*100) if total else 0
-    doc_title = st.session_state.get("template_name", "")
-    st.markdown(f'<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.45rem;">'
-                f'<div class="sec-badge sbb" style="margin-bottom:0;">Section {idx+1} of {total}</div>'
-                f'{"<div style=\"font-size:0.63rem;font-weight:600;color:#9ca3af;letter-spacing:0.04em;text-transform:uppercase;\">·</div><div style=\"font-size:0.63rem;font-weight:700;color:#6b7280;letter-spacing:0.04em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px;\">"+doc_title+"</div>" if doc_title else ""}'
-                f'</div>'
+    st.markdown(f'<div class="sec-badge sbb">Section {idx+1} of {total}</div>'
                 f'<div class="sec-title">{section.get("title","")}</div>'
                 f'<div class="prog-wrap"><div class="prog-bg"><div class="prog-fill" style="width:{pct}%"></div></div>'
                 f'<div class="prog-txt">{pct}% complete</div></div>', unsafe_allow_html=True)
@@ -786,11 +823,7 @@ def _approve_panel():
     section=st.session_state.current_section; sec_id=section["id"]
     idx=st.session_state.current_index; total=st.session_state.total_sections
     pct=int((idx/total)*100) if total else 0
-    doc_title = st.session_state.get("template_name", "")
-    st.markdown(f'<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.45rem;">'
-                f'<div class="sec-badge sbg" style="margin-bottom:0;">✓ Generated</div>'
-                f'{"<div style=\"font-size:0.63rem;font-weight:600;color:#9ca3af;letter-spacing:0.04em;text-transform:uppercase;\">·</div><div style=\"font-size:0.63rem;font-weight:700;color:#6b7280;letter-spacing:0.04em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px;\">"+doc_title+"</div>" if doc_title else ""}'
-                f'</div>'
+    st.markdown(f'<div class="sec-badge sbg">✓ Generated</div>'
                 f'<div class="sec-title">{section.get("title","")}</div>'
                 f'<div class="prog-wrap"><div class="prog-bg"><div class="prog-fill" style="width:{pct}%"></div></div>'
                 f'<div class="prog-txt">{pct}% complete</div></div>'
@@ -1106,7 +1139,10 @@ def page_notion_library():
 
 
 # ─────────────────────────────────────────────────────────────
-if st.session_state.page == "home":             page_home()
+# ROUTING
+# ─────────────────────────────────────────────────────────────
+render_sidebar()
+if   st.session_state.page == "home":           page_home()
 elif st.session_state.page == "context":        page_context()
 elif st.session_state.page == "generating":     page_generating()
 elif st.session_state.page == "view_doc":       page_view_doc()
