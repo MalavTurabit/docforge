@@ -11,9 +11,14 @@ Query router classifies every query into one of 4 paths:
 
 import os
 import json
+import logging
+import time
 from openai import AzureOpenAI
 from app.services.embeddings import embed_texts
 from app.rag_config import get_client, COLLECTION_NAME, TOP_K
+from app.services.rag_cache import get_retrieval_cache, set_retrieval_cache
+
+logger = logging.getLogger("docforge.rag")
 
 # ── Azure OpenAI Chat client ─────────────────────────────────────────────────
 _chat_client: AzureOpenAI | None = None
@@ -81,14 +86,65 @@ Respond with JSON only:
 
     raw = _chat([{"role": "user", "content": prompt}], temperature=0, max_tokens=150)
     try:
-        clean = raw.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
+        clean  = raw.replace("```json", "").replace("```", "").strip()
+        result = json.loads(clean)
+        logger.info(f"[classify] query='{query[:60]}' → path={result.get('path')} reason={result.get('reasoning','')[:60]}")
+        return result
     except Exception:
-        # Default to single retrieval if parsing fails
+        logger.warning(f"[classify] Failed to parse response for query='{query[:60]}' — falling back to single_retrieval")
         return {"path": "single_retrieval", "reasoning": "fallback", "doc_hint": None}
 
 
-# ── STEP 2: Retrieval functions ──────────────────────────────────────────────
+# ── STEP 1b: Query Refinement ────────────────────────────────────────────────
+
+def refine_query(query: str) -> str:
+    """
+    Rewrites vague or ambiguous queries into clear, specific search queries
+    before hitting Milvus. Only called for single_retrieval and multi_step paths.
+
+    Examples:
+      "what about security?"
+        → "What are the security controls and policies for data protection?"
+
+      "tell me about hr stuff"
+        → "What are the HR policies regarding employee conduct and remote work?"
+
+      "compliance things"
+        → "What compliance requirements and regulatory frameworks apply across departments?"
+
+    If the query is already clear and specific, returns it unchanged.
+    """
+    prompt = f"""You are a search query optimizer for a document Q&A system.
+Rewrite the following query to be clear, specific, and optimized for document retrieval.
+
+Rules:
+- If the query is already clear and specific, return it EXACTLY as-is
+- If vague, expand it into a precise question
+- Keep it as a single sentence question
+- Do NOT add information not implied by the original query
+- Do NOT change the intent of the query
+
+Original query: "{query}"
+
+Respond with ONLY the rewritten query — no explanation, no quotes."""
+
+    refined = _chat(
+        [{"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=100,
+    ).strip().strip('"').strip("'")
+
+    # Safety — if something went wrong, return original
+    if not refined or len(refined) < 5:
+        logger.warning(f"[refine] Got empty result for query='{query[:60]}' — using original")
+        return query
+
+    if refined != query:
+        logger.info(f"[refine] '{query[:60]}' → '{refined[:60]}'")
+    else:
+        logger.info(f"[refine] Query unchanged: '{query[:60]}'")
+
+    return refined
 
 # MMR config
 MMR_FETCH_K   = 20    # fetch more candidates from Milvus before MMR reranking
@@ -114,61 +170,46 @@ def mmr_rerank(
 ) -> list[dict]:
     """
     Maximal Marginal Relevance reranking.
-
-    Selects chunks that are:
-    - Relevant to the query (high cosine similarity)
-    - Diverse from each other (low similarity between selected chunks)
+    Uses pre-fetched vectors stored in chunk["_vec"] — no re-embedding needed.
 
     Formula: MMR = argmax[ λ * sim(chunk, query) - (1-λ) * max(sim(chunk, selected)) ]
-
-    lambda_val = 0.6 means 60% relevance, 40% diversity
+    lambda_val = 0.7 means 70% relevance, 30% diversity
     """
     if not chunks or top_k >= len(chunks):
+        # Clean _vec before returning
+        for c in chunks:
+            c.pop("_vec", None)
         return chunks[:top_k]
-
-    # Each chunk needs its embedding for inter-chunk similarity
-    # We use the raw_text as a proxy — re-embed selected chunks
-    chunk_texts   = [c["raw_text"] for c in chunks]
-    chunk_vectors = embed_texts(chunk_texts)
-
-    # Attach vectors to chunks temporarily
-    for c, v in zip(chunks, chunk_vectors):
-        c["_vec"] = v
 
     selected  = []
     remaining = list(range(len(chunks)))
 
     while len(selected) < top_k and remaining:
         mmr_scores = []
-
         for idx in remaining:
-            # Relevance score — similarity to query
-            rel_score = _cosine_similarity(query_vector, chunks[idx]["_vec"])
+            vec       = chunks[idx].get("_vec")
+            if not vec:
+                mmr_scores.append((idx, chunks[idx]["score"]))
+                continue
 
-            # Diversity score — max similarity to already-selected chunks
-            if not selected:
-                div_score = 0.0
-            else:
-                div_score = max(
-                    _cosine_similarity(chunks[idx]["_vec"], chunks[s]["_vec"])
-                    for s in selected
-                )
-
-            # MMR score
+            rel_score = _cosine_similarity(query_vector, vec)
+            div_score = max(
+                (_cosine_similarity(vec, chunks[s]["_vec"])
+                 for s in selected if chunks[s].get("_vec")),
+                default=0.0
+            )
             mmr = lambda_val * rel_score - (1 - lambda_val) * div_score
             mmr_scores.append((idx, mmr))
 
-        # Pick the chunk with highest MMR score
         best_idx = max(mmr_scores, key=lambda x: x[1])[0]
         selected.append(best_idx)
         remaining.remove(best_idx)
 
-    # Clean up temp vectors and return in selected order
     result = []
-    for i, idx in enumerate(selected):
+    for idx in selected:
         c = chunks[idx].copy()
         c.pop("_vec", None)
-        c["score"] = round(c["score"], 4)   # keep original Milvus score
+        c["score"] = round(c["score"], 4)
         result.append(c)
 
     return result
@@ -184,6 +225,14 @@ def retrieve_chunks(
     Embed query → fetch MMR_FETCH_K candidates from Milvus
     → MMR rerank → return top_k diverse + relevant chunks.
     """
+    # Check retrieval cache first — avoids re-embedding + re-searching
+    cached = get_retrieval_cache(query, industry, doc_type)
+    if cached is not None:
+        logger.info(f"[retrieve] Cache HIT — query='{query[:60]}'")
+        return cached
+
+    logger.info(f"[retrieve] Cache MISS — embedding + searching query='{query[:60]}' filters=industry:{industry} doc_type:{doc_type}")
+    t0           = time.time()
     query_vector = embed_texts([query])[0]
     client       = get_client()
 
@@ -204,11 +253,12 @@ def retrieve_chunks(
         "output_fields":   ["chunk_id", "page_id", "doc_title", "section_heading",
                             "doc_type", "industry", "version", "chunk_index", "raw_text"],
         "search_params":   {"metric_type": "COSINE"},
+        "anns_field":      "embedding",
     }
     if filter_expr:
         search_params["filter"] = filter_expr
 
-    results = client.search(**search_params)
+    results    = client.search(**search_params)
     candidates = []
     for hit in results[0]:
         e = hit.get("entity", {})
@@ -221,10 +271,37 @@ def retrieve_chunks(
             "industry":        e.get("industry"),
             "raw_text":        e.get("raw_text"),
             "score":           round(float(hit.get("distance", 0)), 4),
+            # Pass the Milvus distance as a proxy vector signal for MMR
+            # We store the query_vector similarity as _vec approximation
+            "_vec":            None,  # will be set below
         })
 
-    # Apply MMR reranking
-    return mmr_rerank(query_vector, candidates, top_k)
+    # Fetch actual stored vectors for MMR inter-chunk diversity computation
+    # This avoids re-embedding — we get vectors directly from Milvus
+    if candidates:
+        chunk_ids = [c["chunk_id"] for c in candidates if c["chunk_id"]]
+        try:
+            vec_results = client.query(
+                collection_name=COLLECTION_NAME,
+                filter=f'chunk_id in {json.dumps(chunk_ids)}',
+                output_fields=["chunk_id", "embedding"],
+                limit=len(chunk_ids),
+            )
+            vec_map = {r["chunk_id"]: r["embedding"] for r in vec_results}
+            for c in candidates:
+                c["_vec"] = vec_map.get(c["chunk_id"])
+
+        except Exception as e:
+            logger.warning(f"[retrieve] Could not fetch vectors for MMR: {e}")
+
+    # Apply MMR reranking using fetched vectors — no re-embedding needed
+    logger.info(f"[retrieve] Milvus returned {len(candidates)} candidates in {time.time()-t0:.2f}s — running MMR")
+    reranked = mmr_rerank(query_vector, candidates, top_k)
+    logger.info(f"[retrieve] MMR selected {len(reranked)} chunks: {[c['doc_title'][:25] + ' → ' + c['section_heading'][:15] for c in reranked]}")
+
+    # Cache the final reranked results
+    set_retrieval_cache(query, industry, doc_type, reranked)
+    return reranked
 
 
 def retrieve_multi_step(query: str, top_k: int = TOP_K) -> list[dict]:
@@ -309,8 +386,15 @@ def _build_context(chunks: list[dict]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-def generate_answer(query: str, chunks: list[dict]) -> str:
-    """Generate grounded answer from retrieved chunks with inline citations."""
+def generate_answer(
+    query: str,
+    chunks: list[dict],
+    chat_history: list[dict] | None = None,
+) -> str:
+    """Generate grounded answer from retrieved chunks with inline citations.
+    Accepts optional chat_history for multi-turn memory.
+    chat_history = [{"role": "user"|"assistant", "content": "..."}]
+    """
     if not chunks:
         return "I could not find any relevant documents to answer your question."
 
@@ -320,19 +404,32 @@ Answer ONLY using the provided document excerpts.
 Rules:
 - Always cite sources inline using [1], [2] etc.
 - If the answer is not in the context, say so explicitly — do NOT guess.
-- Be concise and professional."""
+- Be concise and professional.
+- Use the conversation history to understand follow-up questions and references like "my name", "what I said", "the previous answer" etc."""
 
-    user = f"""Document excerpts:
+    # Build messages — system + history + current question
+    messages = [{"role": "system", "content": system}]
+
+    # Add last N turns of chat history for context (last 6 messages = 3 turns)
+    if chat_history:
+        for msg in chat_history[-6:]:
+            role    = msg.get("role", "user")
+            content = msg.get("content", "")
+            # Only include user and assistant messages, skip empty
+            if role in ("user", "assistant") and content.strip():
+                messages.append({"role": role, "content": content})
+
+    # Add current question with document context
+    user_msg = f"""Document excerpts:
 {context}
 
 Question: {query}
 
 Answer (with inline citations):"""
 
-    return _chat([
-        {"role": "system", "content": system},
-        {"role": "user",   "content": user},
-    ])
+    messages.append({"role": "user", "content": user_msg})
+
+    return _chat(messages)
 
 
 def generate_compare_answer(query: str, chunks_1: list[dict], chunks_2: list[dict]) -> str:
@@ -388,19 +485,23 @@ Respond with JSON only:
 
     raw = _chat([{"role": "user", "content": prompt}], temperature=0, max_tokens=150)
     try:
-        clean = raw.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
+        clean   = raw.replace("```json", "").replace("```", "").strip()
+        verdict = json.loads(clean)
+        logger.info(f"[judge] grounded={verdict.get('grounded')} reason={verdict.get('reason','')[:80]}")
+        return verdict
     except Exception:
+        logger.warning("[judge] Failed to parse verdict — defaulting to grounded=True")
         return {"grounded": True, "reason": "Could not parse judge response"}
 
 
 # ── MAIN: Full Adaptive RAG pipeline ─────────────────────────────────────────
 
 def rag_query(
-    query:    str,
-    industry: str | None = None,
-    doc_type: str | None = None,
-    top_k:    int = TOP_K,
+    query:        str,
+    industry:     str | None = None,
+    doc_type:     str | None = None,
+    top_k:        int = TOP_K,
+    chat_history: list[dict] | None = None,
 ) -> dict:
     """
     Full adaptive RAG pipeline:
@@ -411,6 +512,9 @@ def rag_query(
     Returns {answer, chunks, grounded, sources, path}
     """
 
+    t_start = time.time()
+    logger.info(f"[rag_query] START query='{query[:80]}' industry={industry} doc_type={doc_type}")
+
     # ── 1. Classify ──────────────────────────────────────────
     classification = classify_query(query)
     path = classification.get("path", "single_retrieval")
@@ -419,10 +523,14 @@ def rag_query(
 
     # PATH 1 — No retrieval needed
     if path == "no_retrieval":
-        answer = _chat([
-            {"role": "system", "content": "You are CiteRAG, a helpful document Q&A assistant. Answer briefly and helpfully."},
-            {"role": "user",   "content": query},
-        ])
+        messages = [{"role": "system", "content": "You are CiteRAG, a helpful document Q&A assistant. Answer briefly and helpfully. Use conversation history to remember context like names and previous statements."}]
+        if chat_history:
+            for msg in chat_history[-6:]:
+                if msg.get("role") in ("user", "assistant") and msg.get("content", "").strip():
+                    messages.append({"role": msg["role"], "content": msg["content"]})
+        messages.append({"role": "user", "content": query})
+        answer = _chat(messages)
+        logger.info(f"[rag_query] DONE path=no_retrieval time={time.time()-t_start:.2f}s")
         return {
             "answer":   answer,
             "chunks":   [],
@@ -465,10 +573,12 @@ def rag_query(
 
     # PATH 3 — Multi-step iterative retrieval
     if path == "multi_step":
-        chunks = retrieve_multi_step(query, top_k=top_k)
+        refined_query = refine_query(query)
+        chunks = retrieve_multi_step(refined_query, top_k=top_k)
     else:
         # PATH 2 — Single retrieval (default)
-        chunks = retrieve_chunks(query, top_k=top_k, industry=industry, doc_type=doc_type)
+        refined_query = refine_query(query)
+        chunks = retrieve_chunks(refined_query, top_k=top_k, industry=industry, doc_type=doc_type)
 
     if not chunks:
         return {
@@ -480,7 +590,7 @@ def rag_query(
         }
 
     # ── 3. Generate ───────────────────────────────────────────
-    answer = generate_answer(query, chunks)
+    answer = generate_answer(query, chunks, chat_history=chat_history)
 
     # ── 4. Judge (Self-RAG style) ─────────────────────────────
     verdict = judge_answer(query, answer, chunks)
@@ -495,6 +605,11 @@ def rag_query(
         f"{c['doc_title']} → {c['section_heading']}" if c.get("section_heading") else c["doc_title"]
         for c in chunks
     ))
+
+    logger.info(
+        f"[rag_query] DONE path={path} chunks={len(chunks)} "
+        f"grounded={verdict.get('grounded')} time={time.time()-t_start:.2f}s"
+    )
 
     return {
         "answer":   answer,

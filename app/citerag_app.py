@@ -22,6 +22,8 @@ DEFAULTS = {
     "rag_editing_title":   False,
     "rag_filter_industry": "All",
     "rag_filter_dept":     "All",   # department filter from /departments/
+    "_cached_industries":  None,    # cached once per session
+    "_cached_status":      None,    # cached once per session
     "rag_rename_idx":      None,   # index of history item being renamed
 }
 for k, v in DEFAULTS.items():
@@ -32,13 +34,25 @@ INDUSTRIES = ["All", "IT & Security", "Finance", "Human Resources",
               "Product Management", "Engineering", "Legal & Compliance",
               "Sales & Marketing", "Business Ops"]
 
-# ── Fetch industries from FastAPI ─────────────────────────────
+# ── Fetch industries from FastAPI — cached in session ─────────
 def fetch_industries() -> list[str]:
-    """Returns unique industry values from GET /rag/industries"""
+    """Returns unique industry values — cached in session state."""
+    if st.session_state._cached_industries is not None:
+        return st.session_state._cached_industries
     data, err = api("get", "/rag/industries")
-    if err or not data:
-        return []
-    return data.get("industries", [])
+    result = data.get("industries", []) if (data and not err) else []
+    st.session_state._cached_industries = result
+    return result
+
+
+def fetch_rag_status() -> dict:
+    """Returns RAG status — cached in session state, refreshed after sync."""
+    if st.session_state._cached_status is not None:
+        return st.session_state._cached_status
+    data, _ = api("get", "/rag/status")
+    result = data or {}
+    st.session_state._cached_status = result
+    return result
 
 # ── API helper ────────────────────────────────────────────────
 def api(method, path, **kwargs):
@@ -80,6 +94,18 @@ def _load_chat(idx: int):
     st.session_state.rag_chat_title  = item["title"]
     st.session_state.rag_editing_title = False
 
+
+def _build_history_payload() -> list[dict]:
+    """Build chat history payload for the API — last 6 messages excluding current."""
+    msgs = st.session_state.rag_messages
+    history = []
+    for m in msgs[-6:]:
+        role    = m.get("role", "user")
+        content = m.get("content", "")
+        if role in ("user", "assistant") and content.strip():
+            history.append({"role": role, "content": content})
+    return history
+
 # ── Sidebar ───────────────────────────────────────────────────
 def render_sidebar():
     with st.sidebar:
@@ -101,6 +127,9 @@ def render_sidebar():
             with st.spinner("Syncing…"):
                 data, err = api("post", "/sync/run")
             st.session_state.rag_sync_status = "error" if err else "ok"
+            # Invalidate status cache so it refreshes after sync
+            st.session_state._cached_status = None
+            st.session_state._cached_industries = None
             st.rerun()
         if st.session_state.rag_sync_status == "ok":
             st.success("✓ Synced")
@@ -140,20 +169,6 @@ def render_sidebar():
             "Retrieval Inspector",
             value=st.session_state.rag_inspector_open,
             key="insp_tog")
-
-        # ── Status ────────────────────────────────────────────
-        st.divider()
-        st.caption("**Status**")
-        status_data, _ = api("get", "/rag/status")
-        if status_data:
-            milvus_ok  = status_data.get("milvus_connected", False)
-            count      = status_data.get("docs_indexed", 0)
-            milvus_str = ":green[connected]" if milvus_ok else ":orange[not connected]"
-            st.caption(f"🗄 Milvus — {milvus_str}")
-            st.caption(f"📚 Docs indexed — {count}")
-        else:
-            st.caption("🗄 Milvus — :orange[not connected]")
-            st.caption("📚 Docs indexed — :orange[0]")
 
         # ── Chat History ──────────────────────────────────────
         st.divider()
@@ -202,6 +217,16 @@ def render_sidebar():
                                      use_container_width=True):
                             st.session_state.rag_history.pop(i)
                             st.rerun()
+
+        # ── Status ────────────────────────────────────────────
+        st.divider()
+        st.caption("**Status**")
+        status_data = fetch_rag_status()
+        milvus_ok   = status_data.get("milvus_connected", False)
+        count       = status_data.get("docs_indexed", 0)
+        milvus_str  = ":green[connected]" if milvus_ok else ":orange[not connected]"
+        st.caption(f"🗄 Milvus — {milvus_str}")
+        st.caption(f"📚 Docs indexed — {count}")
 
 
 # ── Main page ─────────────────────────────────────────────────
@@ -275,9 +300,10 @@ def page_chat():
                                 {"role":"user","content":q,"sources":[]})
                             with st.spinner("Searching docs…"):
                                 data, err = api("post", "/rag/chat", json={
-                                    "query":    q,
-                                    "top_k":    5,
-                                    "industry": None if dept == "All" else dept,
+                                    "query":        q,
+                                    "top_k":        5,
+                                    "industry":     None if dept == "All" else dept,
+                                    "chat_history": _build_history_payload(),
                                 })
                             if err:
                                 st.session_state.rag_messages.append(
@@ -297,9 +323,24 @@ def page_chat():
             for msg in messages:
                 with st.chat_message(msg["role"]):
                     st.write(msg["content"])
-                    sources = msg.get("sources", [])
-                    if sources:
-                        st.caption("Sources: " + " · ".join(f"📄 {s}" for s in sources))
+
+                # Render sources OUTSIDE chat bubble so markdown links work
+                sources_with_links = msg.get("sources_with_links", [])
+                sources            = msg.get("sources", [])
+                if msg["role"] == "assistant" and (sources_with_links or sources):
+                    if sources_with_links:
+                        parts = []
+                        for i, s in enumerate(sources_with_links):
+                            label = s["label"]
+                            url   = s.get("url", "")
+                            if url:
+                                parts.append(f"[[{i+1}] {label}]({url})")
+                            else:
+                                parts.append(f"[{i+1}] {label}")
+                        st.markdown("**Sources:** " + "  ·  ".join(parts))
+                    elif sources:
+                        parts = [f"[{i+1}] {s}" for i, s in enumerate(sources)]
+                        st.markdown("**Sources:** " + "  ·  ".join(parts))
 
     # ── Inspector ─────────────────────────────────────────────
     if insp_col:
@@ -328,20 +369,35 @@ def page_chat():
         dept = st.session_state.rag_filter_dept
         with st.spinner("Searching docs and generating answer…"):
             data, err = api("post", "/rag/chat", json={
-                "query":    user_input,
-                "top_k":    5,
-                "industry": None if dept == "All" else dept,
+                "query":        user_input,
+                "top_k":        5,
+                "industry":     None if dept == "All" else dept,
+                "chat_history": _build_history_payload(),
             })
         if err:
             st.session_state.rag_messages.append(
                 {"role":"assistant","content":f"❌ Error: {err}","sources":[]})
         else:
+            # Build sources with Notion URLs from chunk page_ids
+            chunks  = data.get("chunks", [])
+            sources_with_links = []
+            seen_sources = set()
+            for c in chunks:
+                label = f"{c.get('doc_title','')} → {c.get('section_heading','')}" if c.get("section_heading") else c.get("doc_title","")
+                pid   = c.get("page_id", "")
+                url   = f"https://notion.so/{pid.replace('-','')}" if pid else ""
+                key   = label
+                if key not in seen_sources:
+                    seen_sources.add(key)
+                    sources_with_links.append({"label": label, "url": url})
+
             st.session_state.rag_messages.append({
                 "role":    "assistant",
                 "content": data["answer"],
                 "sources": data["sources"],
+                "sources_with_links": sources_with_links,
             })
-            st.session_state.rag_last_chunks = data.get("chunks", [])
+            st.session_state.rag_last_chunks = chunks
             # Auto-set title from first user message
             if st.session_state.rag_chat_title == "New Chat":
                 st.session_state.rag_chat_title = user_input[:46] + ("…" if len(user_input) > 46 else "")

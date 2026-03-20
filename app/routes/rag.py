@@ -16,11 +16,17 @@ router = APIRouter(prefix="/rag", tags=["RAG"])
 
 # ── Request / Response models ────────────────────────────────────────────────
 
+class ChatMessage(BaseModel):
+    role:    str   # "user" or "assistant"
+    content: str
+
+
 class ChatRequest(BaseModel):
-    query:    str
-    industry: Optional[str] = None   # filter — None or "All" means no filter
-    doc_type: Optional[str] = None   # filter — None or "All" means no filter
-    top_k:    Optional[int] = 5
+    query:        str
+    industry:     Optional[str] = None
+    doc_type:     Optional[str] = None
+    top_k:        Optional[int] = 5
+    chat_history: Optional[list[ChatMessage]] = None   # previous messages for memory
 
 
 class ChunkOut(BaseModel):
@@ -28,6 +34,7 @@ class ChunkOut(BaseModel):
     section_heading: str
     raw_text:        str
     score:           float
+    page_id:         Optional[str] = ""
 
 
 class ChatResponse(BaseModel):
@@ -52,12 +59,16 @@ def chat(req: ChatRequest):
     industry = req.industry if req.industry and req.industry != "All" else None
     doc_type = req.doc_type if req.doc_type and req.doc_type != "All" else None
 
+    # Convert ChatMessage objects to plain dicts for rag_service
+    history = [{"role": m.role, "content": m.content} for m in req.chat_history] if req.chat_history else None
+
     try:
         result = rag_query(
-            query    = req.query,
-            industry = industry,
-            doc_type = doc_type,
-            top_k    = req.top_k or 5,
+            query        = req.query,
+            industry     = industry,
+            doc_type     = doc_type,
+            top_k        = req.top_k or 5,
+            chat_history = history,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"RAG pipeline error: {str(e)}")
@@ -65,7 +76,13 @@ def chat(req: ChatRequest):
     return ChatResponse(
         answer   = result["answer"],
         sources  = result["sources"],
-        chunks   = [ChunkOut(**{k: c[k] for k in ChunkOut.model_fields}) for c in result["chunks"]],
+        chunks   = [ChunkOut(
+                doc_title       = c.get("doc_title", ""),
+                section_heading = c.get("section_heading", ""),
+                raw_text        = c.get("raw_text", ""),
+                score           = c.get("score", 0.0),
+                page_id         = c.get("page_id") or "",
+            ) for c in result["chunks"]],
         grounded = result["grounded"],
     )
 

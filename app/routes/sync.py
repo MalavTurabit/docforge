@@ -10,18 +10,17 @@ from datetime import datetime
 from app.services.ingest_service import ingest_all
 from app.rag_config import collection_stats
 from app.redis_client import get_redis
+from app.services.rag_cache import set_last_sync, get_last_sync, get_cache_stats
 
 router = APIRouter(prefix="/sync", tags=["Sync"])
 
-LAST_RUN_KEY = "rag:sync:last_run"
 
 
 def _run_ingest():
     """Background task — runs full ingest and stores timestamp in Redis."""
     try:
         result = ingest_all()
-        r = get_redis()
-        r.set(LAST_RUN_KEY, datetime.utcnow().isoformat())
+        set_last_sync()   # store via rag_cache
         print(f"[sync] Ingest complete: {result}")
     except Exception as e:
         print(f"[sync] Ingest failed: {e}")
@@ -43,19 +42,16 @@ def run_sync(background_tasks: BackgroundTasks):
 @router.get("/status")
 def sync_status():
     """Return collection stats + last sync timestamp."""
-    stats = collection_stats()
-    r     = get_redis()
-
-    last_run = None
-    try:
-        val = r.get(LAST_RUN_KEY)
-        if val:
-            last_run = val if isinstance(val, str) else val.decode()
-    except Exception:
-        pass
-
+    stats    = collection_stats()
+    last_run = get_last_sync()
     return {
         "collection_exists": stats["exists"],
         "docs_indexed":      stats["count"],
         "last_sync":         last_run,
     }
+
+
+@router.get("/cache-stats")
+def cache_stats():
+    """Return Redis cache statistics for all RAG cache keys."""
+    return get_cache_stats()

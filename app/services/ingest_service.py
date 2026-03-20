@@ -13,6 +13,10 @@ from app.rag_config import get_client, COLLECTION_NAME, TOP_K
 
 # ── Embedding ────────────────────────────────────────────────────────────────
 from app.services.embeddings import embed_texts  # noqa: E402
+from app.services.rag_cache import (
+    get_notion_page_cache, set_notion_page_cache,
+    check_notion_rate_limit, invalidate_notion_page_cache,
+)
 
 # ── Notion API config ────────────────────────────────────────────────────────
 NOTION_API_KEY   = os.getenv("NOTION_API_KEY")
@@ -138,8 +142,20 @@ def fetch_all_library_pages() -> list[dict]:
     return pages
 
 
-def fetch_page_blocks(page_id: str) -> list[dict]:
-    """Fetch all blocks for a Notion page (handles pagination)."""
+def fetch_page_blocks(page_id: str, use_cache: bool = True) -> list[dict]:
+    """Fetch all blocks for a Notion page (handles pagination).
+    Uses Redis cache to avoid re-fetching unchanged pages (6hr TTL).
+    """
+    # Check cache first
+    if use_cache:
+        cached = get_notion_page_cache(page_id)
+        if cached is not None:
+            return cached
+
+    # Check rate limit before calling Notion API
+    if not check_notion_rate_limit():
+        raise Exception("Notion API rate limit exceeded — try again in a minute")
+
     blocks = []
     url    = f"{NOTION_BASE}/blocks/{page_id}/children"
     params = {"page_size": 100}
@@ -153,6 +169,12 @@ def fetch_page_blocks(page_id: str) -> list[dict]:
         if not data.get("has_more"):
             break
         params["start_cursor"] = data["next_cursor"]
+        # Rate limit check for paginated requests
+        check_notion_rate_limit()
+
+    # Cache the result for 6 hours
+    if use_cache:
+        set_notion_page_cache(page_id, blocks)
 
     return blocks
 
@@ -220,6 +242,8 @@ def upsert_page_chunks(
 
     if rows:
         client.upsert(collection_name=COLLECTION_NAME, data=rows)
+        # Invalidate Notion page cache so next ingest fetches fresh blocks
+        invalidate_notion_page_cache(page_id)
 
 
 def delete_page_chunks(page_id: str):
