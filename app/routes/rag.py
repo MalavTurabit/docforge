@@ -78,3 +78,27 @@ def rag_status():
         "milvus_connected": stats["exists"],
         "docs_indexed":     stats["count"],
     }
+
+
+@router.get("/industries")
+def get_industries():
+    """
+    Returns all unique industry values stored in Milvus.
+    Used by CiteRAG UI to populate the Department filter dynamically.
+    """
+    from app.rag_config import get_client, COLLECTION_NAME
+    try:
+        client  = get_client()
+        results = client.query(
+            collection_name=COLLECTION_NAME,
+            filter="chunk_index == 0",
+            output_fields=["industry"],
+            limit=500,
+        )
+        industries = sorted(set(
+            r["industry"] for r in results
+            if r.get("industry") and r["industry"].strip()
+        ))
+        return {"industries": industries}
+    except Exception as e:
+        return {"industries": []}

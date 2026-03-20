@@ -23,9 +23,71 @@ NOTION_BASE      = "https://api.notion.com/v1"
 # ── Chunking config ──────────────────────────────────────────────────────────
 MAX_TOKENS_PER_CHUNK = 400    # ~400 tokens ≈ 300 words
 MIN_CHUNK_CHARS      = 80     # skip tiny sections
+OVERLAP_CHARS        = 60     # overlap between consecutive chunks (~1 sentence
 
 
-# ── Notion helpers ───────────────────────────────────────────────────────────
+def chunk_page_blocks(blocks: list[dict]) -> list[dict]:
+    """
+    Split blocks into chunks by heading with overlap.
+
+    Strategy:
+    1. Split by ## Heading → one chunk per section
+    2. If section > MAX_TOKENS_PER_CHUNK → split by paragraph
+    3. Each chunk gets OVERLAP_CHARS from the END of the previous chunk
+       prepended to its text — so boundary context is never lost.
+
+    Returns list of {heading, text, chunk_index}
+    """
+    # ── Step 1: collect raw sections by heading ───────────────
+    raw_sections = []
+    current_heading = "Introduction"
+    current_lines   = []
+
+    def _collect(heading, lines):
+        text = "\n".join(lines).strip()
+        if len(text) < MIN_CHUNK_CHARS:
+            return
+        # Split oversized sections by paragraph
+        if len(text) > MAX_TOKENS_PER_CHUNK * 4:
+            paragraphs = [p.strip() for p in text.split("\n\n")
+                          if len(p.strip()) >= MIN_CHUNK_CHARS]
+            for p in paragraphs:
+                raw_sections.append({"heading": heading, "text": p})
+        else:
+            raw_sections.append({"heading": heading, "text": text})
+
+    for block in blocks:
+        is_hdg, hdg_text = _is_heading(block)
+        if is_hdg:
+            _collect(current_heading, current_lines)
+            current_heading = hdg_text
+            current_lines   = []
+        else:
+            line = _block_text(block)
+            if line:
+                current_lines.append(line)
+    _collect(current_heading, current_lines)
+
+    # ── Step 2: apply overlap between consecutive chunks ─────
+    chunks = []
+    for i, section in enumerate(raw_sections):
+        text = section["text"]
+
+        # Prepend tail of previous chunk as overlap context
+        if i > 0:
+            prev_text = raw_sections[i - 1]["text"]
+            overlap   = prev_text[-OVERLAP_CHARS:].strip()
+            # Only prepend if it doesn't already start the current text
+            if overlap and not text.startswith(overlap):
+                text = overlap + "\n" + text
+
+        chunks.append({
+            "heading":     section["heading"],
+            "text":        text,
+            "chunk_index": i,
+        })
+
+    return chunks
 
 def _notion_headers() -> dict:
     return {
@@ -113,59 +175,9 @@ def _is_heading(block: dict) -> tuple[bool, str]:
 
 # ── Chunking ─────────────────────────────────────────────────────────────────
 
-def chunk_page_blocks(blocks: list[dict]) -> list[dict]:
-    """
-    Split blocks into chunks by heading.
-    Each chunk = one heading section.
-    If a section is too long (>MAX_TOKENS_PER_CHUNK words), split by paragraph.
-    Returns list of {heading, text, chunk_index}
-    """
-    chunks   = []
-    current_heading = "Introduction"
-    current_lines   = []
 
-    def _flush(heading, lines, base_idx):
-        text = "\n".join(lines).strip()
-        if len(text) < MIN_CHUNK_CHARS:
-            return base_idx
 
-        # Rough token estimate: 1 token ≈ 0.75 words ≈ 4 chars
-        if len(text) > MAX_TOKENS_PER_CHUNK * 4:
-            # Split by paragraph
-            paragraphs = [p.strip() for p in text.split("\n\n") if len(p.strip()) >= MIN_CHUNK_CHARS]
-            for p in paragraphs:
-                chunks.append({
-                    "heading":     heading,
-                    "text":        p,
-                    "chunk_index": base_idx,
-                })
-                base_idx += 1
-        else:
-            chunks.append({
-                "heading":     heading,
-                "text":        text,
-                "chunk_index": base_idx,
-            })
-            base_idx += 1
-
-        return base_idx
-
-    idx = 0
-    for block in blocks:
-        is_hdg, hdg_text = _is_heading(block)
-        if is_hdg:
-            idx = _flush(current_heading, current_lines, idx)
-            current_heading = hdg_text
-            current_lines   = []
-        else:
-            line = _block_text(block)
-            if line:
-                current_lines.append(line)
-
-    # Flush last section
-    _flush(current_heading, current_lines, idx)
-
-    return chunks
+# ── Notion helpers ───────────────────────────────────────────────────────────
 
 
 

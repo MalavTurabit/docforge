@@ -90,15 +90,102 @@ Respond with JSON only:
 
 # ── STEP 2: Retrieval functions ──────────────────────────────────────────────
 
+# MMR config
+MMR_FETCH_K   = 20    # fetch more candidates from Milvus before MMR reranking
+MMR_LAMBDA    = 0.6   # 0 = max diversity, 1 = max relevance (0.6 = balanced)
+
+
+def _cosine_similarity(v1: list[float], v2: list[float]) -> float:
+    """Simple cosine similarity between two vectors."""
+    import math
+    dot   = sum(a * b for a, b in zip(v1, v2))
+    norm1 = math.sqrt(sum(a * a for a in v1))
+    norm2 = math.sqrt(sum(b * b for b in v2))
+    if norm1 == 0 or norm2 == 0:
+        return 0.0
+    return dot / (norm1 * norm2)
+
+
+def mmr_rerank(
+    query_vector: list[float],
+    chunks:       list[dict],
+    top_k:        int,
+    lambda_val:   float = MMR_LAMBDA,
+) -> list[dict]:
+    """
+    Maximal Marginal Relevance reranking.
+
+    Selects chunks that are:
+    - Relevant to the query (high cosine similarity)
+    - Diverse from each other (low similarity between selected chunks)
+
+    Formula: MMR = argmax[ λ * sim(chunk, query) - (1-λ) * max(sim(chunk, selected)) ]
+
+    lambda_val = 0.6 means 60% relevance, 40% diversity
+    """
+    if not chunks or top_k >= len(chunks):
+        return chunks[:top_k]
+
+    # Each chunk needs its embedding for inter-chunk similarity
+    # We use the raw_text as a proxy — re-embed selected chunks
+    chunk_texts   = [c["raw_text"] for c in chunks]
+    chunk_vectors = embed_texts(chunk_texts)
+
+    # Attach vectors to chunks temporarily
+    for c, v in zip(chunks, chunk_vectors):
+        c["_vec"] = v
+
+    selected  = []
+    remaining = list(range(len(chunks)))
+
+    while len(selected) < top_k and remaining:
+        mmr_scores = []
+
+        for idx in remaining:
+            # Relevance score — similarity to query
+            rel_score = _cosine_similarity(query_vector, chunks[idx]["_vec"])
+
+            # Diversity score — max similarity to already-selected chunks
+            if not selected:
+                div_score = 0.0
+            else:
+                div_score = max(
+                    _cosine_similarity(chunks[idx]["_vec"], chunks[s]["_vec"])
+                    for s in selected
+                )
+
+            # MMR score
+            mmr = lambda_val * rel_score - (1 - lambda_val) * div_score
+            mmr_scores.append((idx, mmr))
+
+        # Pick the chunk with highest MMR score
+        best_idx = max(mmr_scores, key=lambda x: x[1])[0]
+        selected.append(best_idx)
+        remaining.remove(best_idx)
+
+    # Clean up temp vectors and return in selected order
+    result = []
+    for i, idx in enumerate(selected):
+        c = chunks[idx].copy()
+        c.pop("_vec", None)
+        c["score"] = round(c["score"], 4)   # keep original Milvus score
+        result.append(c)
+
+    return result
+
+
 def retrieve_chunks(
     query: str,
     top_k: int = TOP_K,
     industry: str | None = None,
     doc_type: str | None = None,
 ) -> list[dict]:
-    """Embed query → search Milvus → return top_k chunks."""
+    """
+    Embed query → fetch MMR_FETCH_K candidates from Milvus
+    → MMR rerank → return top_k diverse + relevant chunks.
+    """
     query_vector = embed_texts([query])[0]
-    client = get_client()
+    client       = get_client()
 
     filters = []
     if industry and industry != "All":
@@ -107,22 +194,25 @@ def retrieve_chunks(
         filters.append(f'doc_type == "{doc_type}"')
     filter_expr = " && ".join(filters) if filters else ""
 
+    # Fetch more candidates than needed so MMR has room to diversify
+    fetch_k = max(MMR_FETCH_K, top_k * 3)
+
     search_params = {
         "collection_name": COLLECTION_NAME,
-        "data": [query_vector],
-        "limit": top_k,
-        "output_fields": ["chunk_id", "page_id", "doc_title", "section_heading",
-                          "doc_type", "industry", "version", "chunk_index", "raw_text"],
-        "search_params": {"metric_type": "COSINE"},
+        "data":            [query_vector],
+        "limit":           fetch_k,
+        "output_fields":   ["chunk_id", "page_id", "doc_title", "section_heading",
+                            "doc_type", "industry", "version", "chunk_index", "raw_text"],
+        "search_params":   {"metric_type": "COSINE"},
     }
     if filter_expr:
         search_params["filter"] = filter_expr
 
     results = client.search(**search_params)
-    chunks = []
+    candidates = []
     for hit in results[0]:
         e = hit.get("entity", {})
-        chunks.append({
+        candidates.append({
             "chunk_id":        e.get("chunk_id"),
             "page_id":         e.get("page_id"),
             "doc_title":       e.get("doc_title"),
@@ -132,7 +222,9 @@ def retrieve_chunks(
             "raw_text":        e.get("raw_text"),
             "score":           round(float(hit.get("distance", 0)), 4),
         })
-    return chunks
+
+    # Apply MMR reranking
+    return mmr_rerank(query_vector, candidates, top_k)
 
 
 def retrieve_multi_step(query: str, top_k: int = TOP_K) -> list[dict]:
