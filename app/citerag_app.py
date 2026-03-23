@@ -24,6 +24,7 @@ DEFAULTS = {
     "rag_filter_dept":     "All",   # department filter from /departments/
     "_cached_industries":  None,    # cached once per session
     "_cached_status":      None,    # cached once per session
+    "rag_last_scores":     None,    # last RAGAS scores
     "rag_rename_idx":      None,   # index of history item being renamed
 }
 for k, v in DEFAULTS.items():
@@ -57,7 +58,7 @@ def fetch_rag_status() -> dict:
 # ── API helper ────────────────────────────────────────────────
 def api(method, path, **kwargs):
     try:
-        r = getattr(requests, method)(f"{API_BASE}{path}", timeout=60, **kwargs)
+        r = getattr(requests, method)(f"{API_BASE}{path}", timeout=180, **kwargs)
         r.raise_for_status()
         return r.json(), None
     except requests.exceptions.ConnectionError:
@@ -327,7 +328,13 @@ def page_chat():
                 # Render sources OUTSIDE chat bubble so markdown links work
                 sources_with_links = msg.get("sources_with_links", [])
                 sources            = msg.get("sources", [])
-                if msg["role"] == "assistant" and (sources_with_links or sources):
+                content            = msg.get("content", "")
+                # Don't show sources if answer says info not found
+                not_found = any(phrase in content for phrase in [
+                    "could not find", "not found", "no relevant", 
+                    "I can only answer", "outside company documents"
+                ])
+                if msg["role"] == "assistant" and (sources_with_links or sources) and not not_found:
                     if sources_with_links:
                         parts = []
                         for i, s in enumerate(sources_with_links):
@@ -346,6 +353,26 @@ def page_chat():
     if insp_col:
         with insp_col:
             st.subheader("🔎 Retrieval Inspector")
+
+            # ── RAGAS Scores ──────────────────────────────────
+            scores = st.session_state.rag_last_scores
+            if scores:
+                st.markdown("**📊 RAGAS Scores**")
+                metrics = [
+                    ("Faithfulness",      scores.get("faithfulness")),
+                    ("Answer Relevancy",  scores.get("answer_relevancy")),
+                    ("Context Precision", scores.get("context_precision")),
+                    ("Context Recall",    scores.get("context_recall")),
+                ]
+                for name, val in metrics:
+                    if val is not None:
+                        emoji = "🟢" if val >= 0.8 else ("🟡" if val >= 0.6 else "🔴")
+                        st.progress(val, text=f"{emoji} {name}: {val:.2f}")
+                    else:
+                        st.caption(f"⚪ {name}: N/A")
+                st.divider()
+
+            # ── Retrieved Chunks ──────────────────────────────
             chunks = st.session_state.rag_last_chunks
             if not chunks:
                 st.info("Ask a question to see retrieved chunks.")
@@ -373,6 +400,7 @@ def page_chat():
                 "top_k":        5,
                 "industry":     None if dept == "All" else dept,
                 "chat_history": _build_history_payload(),
+                "run_eval":     st.session_state.rag_inspector_open,
             })
         if err:
             st.session_state.rag_messages.append(
@@ -398,6 +426,7 @@ def page_chat():
                 "sources_with_links": sources_with_links,
             })
             st.session_state.rag_last_chunks = chunks
+            st.session_state.rag_last_scores = data.get("ragas_scores")
             # Auto-set title from first user message
             if st.session_state.rag_chat_title == "New Chat":
                 st.session_state.rag_chat_title = user_input[:46] + ("…" if len(user_input) > 46 else "")

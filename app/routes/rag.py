@@ -26,7 +26,8 @@ class ChatRequest(BaseModel):
     industry:     Optional[str] = None
     doc_type:     Optional[str] = None
     top_k:        Optional[int] = 5
-    chat_history: Optional[list[ChatMessage]] = None   # previous messages for memory
+    chat_history: Optional[list[ChatMessage]] = None
+    run_eval:     Optional[bool] = False    # set True to run RAGAS evaluation
 
 
 class ChunkOut(BaseModel):
@@ -38,10 +39,11 @@ class ChunkOut(BaseModel):
 
 
 class ChatResponse(BaseModel):
-    answer:   str
-    sources:  list[str]
-    chunks:   list[ChunkOut]
-    grounded: bool
+    answer:       str
+    sources:      list[str]
+    chunks:       list[ChunkOut]
+    grounded:     bool
+    ragas_scores: Optional[dict] = None
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -69,14 +71,26 @@ def chat(req: ChatRequest):
             doc_type     = doc_type,
             top_k        = req.top_k or 5,
             chat_history = history,
+            run_eval     = req.run_eval or False,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"RAG pipeline error: {str(e)}")
+        err_str = str(e)
+        # Handle Azure content filter (jailbreak/prompt injection detected)
+        if "content_filter" in err_str or "ResponsibleAI" in err_str or "jailbreak" in err_str:
+            return ChatResponse(
+                answer       = "I cannot process this request. It appears to contain content that violates usage policies.",
+                sources      = [],
+                chunks       = [],
+                grounded     = True,
+                ragas_scores = None,
+            )
+        raise HTTPException(status_code=500, detail=f"RAG pipeline error: {err_str}")
 
     return ChatResponse(
-        answer   = result["answer"],
-        sources  = result["sources"],
-        chunks   = [ChunkOut(
+        answer       = result["answer"],
+        sources      = result["sources"],
+        ragas_scores = result.get("ragas_scores"),
+        chunks       = [ChunkOut(
                 doc_title       = c.get("doc_title", ""),
                 section_heading = c.get("section_heading", ""),
                 raw_text        = c.get("raw_text", ""),

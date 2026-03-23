@@ -17,6 +17,7 @@ from openai import AzureOpenAI
 from app.services.embeddings import embed_texts
 from app.rag_config import get_client, COLLECTION_NAME, TOP_K
 from app.services.rag_cache import get_retrieval_cache, set_retrieval_cache
+from app.services.eval_service import evaluate_rag
 
 logger = logging.getLogger("docforge.rag")
 
@@ -34,6 +35,32 @@ def get_chat_client() -> AzureOpenAI:
     return _chat_client
 
 CHAT_DEPLOYMENT = os.getenv("AZURE_LLM_DEPLOYMENT_41_MINI", "gpt-4o-mini")
+
+# ── System persona — injected into EVERY LLM call ───────────────────────────
+# Single source of truth for what CiteRAG is and what it will/won't do.
+CITERAG_SYSTEM = (
+    "You are CiteRAG, a document Q&A assistant  "
+    "internal company documents stored in the Notion library.\n\n"
+    "Your ONLY purpose is to answer questions about company policies, HR, security, "
+    "finance, compliance, legal, contracts, and operational documents.\n\n"
+    "STRICT RULES — never violate these:\n"
+    "1. NEVER answer coding questions, math, general knowledge, science, history, "
+    "or any topic not in the company documents.\n"
+    "2. NEVER answer questions about specific people by name unless they appear "
+    "in a retrieved document excerpt provided to you.\n"
+    "3. NEVER fabricate, assume, or infer facts not explicitly in the document excerpts.\n"
+    "4. NEVER answer about future dates, projections, or plans unless explicitly "
+    "stated in the documents.\n"
+    "5. If the SPECIFIC information asked for is NOT in the retrieved documents, "
+    "respond with ONLY: 'I could not find this information in the available documents.' "
+    "Do NOT mention what you did find. Do NOT speculate. Do NOT add anything else.\n"
+    "6. Always cite sources using [1], [2] etc. for every factual claim.\n"
+    "7. NEVER combine partial or unrelated information from documents to imply an answer. "
+    "Only answer if the EXACT information requested is explicitly present in the excerpts.\n\n"
+    "If asked anything outside company documents, respond: "
+    "'I can only answer questions about company documents. "
+    "Please ask about HR policies, security controls, compliance, contracts, or other company topics.'"
+)
 
 
 def _chat(messages: list, temperature: float = 0.2, max_tokens: int = 800) -> str:
@@ -60,24 +87,31 @@ def classify_query(query: str) -> dict:
       multi_step       — comparison, analysis across multiple docs
       compare          — explicit "compare X vs Y" request
     """
-    prompt = f"""You are a query classifier for a document Q&A system.
+    prompt = f"""You are a query classifier for a document Q&A system that contains company policies and documents.
 Classify the following query into exactly one of these paths:
 
-- no_retrieval: Simple greetings, meta questions about the system, 
-  or questions you can answer without any documents 
-  (e.g. "hello", "what can you do?", "what is GDPR?")
+- no_retrieval: ONLY for pure greetings like "hello", "hi", "how are you",
+  or questions about what THIS system can do like "what can you do?".
+  NEVER use this for any question about a person, topic, document, or company matter.
 
-- single_retrieval: Questions about a specific policy, document, 
-  or topic that can be answered by retrieving relevant sections 
-  (e.g. "What is the remote work policy?", "What are the security controls?")
+- out_of_scope: For questions that cannot be answered from company documents:
+  * Coding / programming questions (e.g. "write python code", "fibonacci series")
+  * General world knowledge (e.g. "who is the president", "what is machine learning")
+  * Math / trivia / jokes
+  * Questions about specific people by name (e.g. "who is Malav?", "who is John?")
+    UNLESS the question is clearly about their role in a company document
+    (e.g. "what is the CEO's policy on remote work" is fine as single_retrieval)
+  Use this to politely decline.
 
-- multi_step: Complex questions requiring reasoning across multiple 
-  documents or multiple retrieval rounds 
-  (e.g. "How do security policies across all departments compare?",
-   "What are all the compliance requirements mentioned in every document?")
+- single_retrieval: Any question about company policies, HR, security, finance,
+  compliance, legal, engineering, contracts, or any business topic.
+  Includes vague queries like "hr stuff", "security?", "tell me about contracts".
 
-- compare: Explicit request to compare two specific documents or sections 
-  (e.g. "Compare the SOW vs MSA", "What is different between the HR policy and remote work policy?")
+- multi_step: Complex questions requiring reasoning across multiple documents.
+  (e.g. "What compliance requirements appear across all departments?")
+
+- compare: Explicit request to compare two specific documents or topics.
+  (e.g. "Compare the SOW vs MSA")
 
 Query: "{query}"
 
@@ -399,13 +433,7 @@ def generate_answer(
         return "I could not find any relevant documents to answer your question."
 
     context = _build_context(chunks)
-    system = """You are CiteRAG, a document Q&A assistant.
-Answer ONLY using the provided document excerpts.
-Rules:
-- Always cite sources inline using [1], [2] etc.
-- If the answer is not in the context, say so explicitly — do NOT guess.
-- Be concise and professional.
-- Use the conversation history to understand follow-up questions and references like "my name", "what I said", "the previous answer" etc."""
+    system = CITERAG_SYSTEM
 
     # Build messages — system + history + current question
     messages = [{"role": "system", "content": system}]
@@ -437,10 +465,9 @@ def generate_compare_answer(query: str, chunks_1: list[dict], chunks_2: list[dic
     ctx_1 = _build_context(chunks_1)
     ctx_2 = _build_context(chunks_2)
 
-    system = """You are CiteRAG, a document comparison assistant.
-Compare the two sets of documents clearly and concisely.
-Use a structured format with sections for similarities and differences.
-Always cite sources inline using [A1], [A2] for first doc and [B1], [B2] for second doc."""
+    system = CITERAG_SYSTEM + """
+When comparing documents, use structured format with similarities and differences.
+Cite sources as [A1], [A2] for first document and [B1], [B2] for second document."""
 
     user = f"""Query: {query}
 
@@ -470,9 +497,14 @@ def judge_answer(query: str, answer: str, chunks: list[dict]) -> dict:
     Returns {"grounded": bool, "reason": str}
     """
     context = _build_context(chunks)
-    prompt = f"""You are a strict fact-checker.
-Check if this answer is fully supported by the provided document excerpts.
-Do NOT penalize for reasonable inference — only flag unsupported claims.
+    prompt = f"""You are a strict fact-checker for a document Q&A system.
+Check if EVERY factual claim in the answer is directly supported by the provided document excerpts.
+
+Rules:
+- If the answer states a specific number, date, name, or figure — it MUST appear in the excerpts
+- If the answer implies a time period (e.g. "for 2027") that is NOT in the excerpts — it is NOT grounded
+- Do NOT accept reasonable inference or extrapolation as grounded
+- Only mark as grounded=true if every single claim has direct evidence in the excerpts
 
 Document excerpts:
 {context}
@@ -481,7 +513,7 @@ Question: {query}
 Answer: {answer}
 
 Respond with JSON only:
-{{"grounded": true/false, "reason": "brief explanation"}}"""
+{{"grounded": true/false, "reason": "brief explanation of what is or is not supported"}}"""
 
     raw = _chat([{"role": "user", "content": prompt}], temperature=0, max_tokens=150)
     try:
@@ -502,6 +534,7 @@ def rag_query(
     doc_type:     str | None = None,
     top_k:        int = TOP_K,
     chat_history: list[dict] | None = None,
+    run_eval:     bool = False,
 ) -> dict:
     """
     Full adaptive RAG pipeline:
@@ -518,12 +551,13 @@ def rag_query(
     # ── 1. Classify ──────────────────────────────────────────
     classification = classify_query(query)
     path = classification.get("path", "single_retrieval")
+    refined_query  = query  # default — overwritten for single/multi_step paths
 
     # ── 2. Route to correct retrieval path ───────────────────
 
-    # PATH 1 — No retrieval needed
+    # PATH 1 — No retrieval needed (greetings / meta questions)
     if path == "no_retrieval":
-        messages = [{"role": "system", "content": "You are CiteRAG, a helpful document Q&A assistant. Answer briefly and helpfully. Use conversation history to remember context like names and previous statements."}]
+        messages = [{"role": "system", "content": CITERAG_SYSTEM}]
         if chat_history:
             for msg in chat_history[-6:]:
                 if msg.get("role") in ("user", "assistant") and msg.get("content", "").strip():
@@ -537,6 +571,22 @@ def rag_query(
             "grounded": True,
             "sources":  [],
             "path":     "no_retrieval",
+        }
+
+    # PATH 0 — Out of scope (coding, general knowledge, off-topic)
+    if path == "out_of_scope":
+        answer = (
+            "I'm CiteRAG — a document Q&A assistant for company policies and documents. "
+            "I can only answer questions about your Notion document library. "
+            "Try asking about HR policies, security controls, compliance requirements, or contracts."
+        )
+        logger.info(f"[rag_query] DONE path=out_of_scope time={time.time()-t_start:.2f}s")
+        return {
+            "answer":   answer,
+            "chunks":   [],
+            "grounded": True,
+            "sources":  [],
+            "path":     "out_of_scope",
         }
 
     # PATH 4 — Compare two documents
@@ -563,12 +613,28 @@ def rag_query(
             f"{c['doc_title']} → {c['section_heading']}" if c.get("section_heading") else c["doc_title"]
             for c in all_chunks
         ))
+
+        # Run full RAGAS for compare — all 4 metrics using synthetic reference
+        ragas_scores = None
+        if run_eval and all_chunks:
+            try:
+                ragas_scores = evaluate_rag(
+                    query  = query,
+                    answer = answer,
+                    chunks = all_chunks,
+                )
+                logger.info(f"[rag_query] RAGAS scores (compare): {ragas_scores}")
+            except Exception as e:
+                logger.warning(f"[rag_query] RAGAS failed for compare: {e}")
+
+        logger.info(f"[rag_query] DONE path=compare chunks={len(all_chunks)} time={time.time()-t_start:.2f}s")
         return {
-            "answer":   answer,
-            "chunks":   all_chunks,
-            "grounded": verdict.get("grounded", True),
-            "sources":  sources,
-            "path":     "compare",
+            "answer":        answer,
+            "chunks":        all_chunks,
+            "grounded":      verdict.get("grounded", True),
+            "sources":       sources,
+            "path":          "compare",
+            "ragas_scores":  ragas_scores,
         }
 
     # PATH 3 — Multi-step iterative retrieval
@@ -597,8 +663,10 @@ def rag_query(
 
     if not verdict.get("grounded", True):
         answer = (
-            f"⚠️ **Grounding check failed** — the answer may not be fully supported "
-            f"by the retrieved documents.\n\nReason: {verdict.get('reason', '')}\n\n---\n\n{answer}"
+            f"⚠️ **This answer could not be verified against your documents.**\n\n"
+            f"Reason: {verdict.get('reason', '')}\n\n"
+            f"The retrieved documents may not contain the specific information requested. "
+            f"Please verify directly in your source documents.\n\n---\n\n{answer}"
         )
 
     sources = list(dict.fromkeys(
@@ -606,15 +674,24 @@ def rag_query(
         for c in chunks
     ))
 
+    # ── 5. RAGAS evaluation (optional — only when run_eval=True) ──
+    ragas_scores = None
+    if run_eval:
+        # Use refined_query for evaluation — more accurate than vague original
+        eval_query = refined_query if 'refined_query' in dir() else query
+        ragas_scores = evaluate_rag(query=eval_query, answer=answer, chunks=chunks)
+        logger.info(f"[rag_query] RAGAS scores: {ragas_scores}")
+
     logger.info(
         f"[rag_query] DONE path={path} chunks={len(chunks)} "
         f"grounded={verdict.get('grounded')} time={time.time()-t_start:.2f}s"
     )
 
     return {
-        "answer":   answer,
-        "chunks":   chunks,
-        "grounded": verdict.get("grounded", True),
-        "sources":  sources,
-        "path":     path,
+        "answer":        answer,
+        "chunks":        chunks,
+        "grounded":      verdict.get("grounded", True),
+        "sources":       sources,
+        "path":          path,
+        "ragas_scores":  ragas_scores,
     }
