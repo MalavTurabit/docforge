@@ -25,6 +25,8 @@ DEFAULTS = {
     "_cached_industries":  None,    # cached once per session
     "_cached_status":      None,    # cached once per session
     "rag_last_scores":     None,    # last RAGAS scores
+    "rag_editing_idx":     None,    # index of message being edited
+    "rag_edit_text":       "",      # text in edit input
     "rag_rename_idx":      None,   # index of history item being renamed
 }
 for k, v in DEFAULTS.items():
@@ -321,33 +323,133 @@ def page_chat():
                                     st.session_state.rag_chat_title = q[:46] + ("…" if len(q) > 46 else "")
                             st.rerun()
         else:
-            for msg in messages:
+            for idx, msg in enumerate(messages):
                 with st.chat_message(msg["role"]):
-                    st.write(msg["content"])
+                    # Edit mode for this message
+                    if st.session_state.rag_editing_idx == idx and msg["role"] == "user":
+                        edited = st.text_area(
+                            "Edit message",
+                            value=msg["content"],
+                            key=f"edit_input_{idx}",
+                            label_visibility="collapsed"
+                        )
+                        col_save, col_cancel = st.columns(2, gap="small")
+                        with col_save:
+                            if st.button("✓ Resend", key=f"resend_{idx}", use_container_width=True, type="primary"):
+                                # Update message and remove all messages after this one
+                                st.session_state.rag_messages[idx]["content"] = edited
+                                st.session_state.rag_messages = st.session_state.rag_messages[:idx+1]
+                                st.session_state.rag_editing_idx = None
+                                # Resend the edited query
+                                dept = st.session_state.rag_filter_dept
+                                with st.spinner("Searching docs…"):
+                                    data, err = api("post", "/rag/chat", json={
+                                        "query":        edited,
+                                        "top_k":        5,
+                                        "industry":     None if dept == "All" else dept,
+                                        "chat_history": _build_history_payload(),
+                                        "run_eval":     st.session_state.rag_inspector_open,
+                                    })
+                                if err:
+                                    st.session_state.rag_messages.append({"role":"assistant","content":f"❌ {err}","sources":[]})
+                                else:
+                                    chunks = data.get("chunks", [])
+                                    sources_with_links = []
+                                    seen_sources = set()
+                                    for c in chunks:
+                                        label = f"{c.get('doc_title','')} → {c.get('section_heading','')}" if c.get("section_heading") else c.get("doc_title","")
+                                        pid   = c.get("page_id", "")
+                                        url   = f"https://notion.so/{pid.replace('-','')}" if pid else ""
+                                        if label not in seen_sources:
+                                            seen_sources.add(label)
+                                            sources_with_links.append({"label": label, "url": url})
+                                    st.session_state.rag_messages.append({
+                                        "role": "assistant", "content": data["answer"],
+                                        "sources": data["sources"], "sources_with_links": sources_with_links,
+                                    })
+                                    st.session_state.rag_last_chunks = chunks
+                                    st.session_state.rag_last_scores = data.get("ragas_scores")
+                                st.rerun()
+                        with col_cancel:
+                            if st.button("✕ Cancel", key=f"cancel_edit_{idx}", use_container_width=True):
+                                st.session_state.rag_editing_idx = None
+                                st.rerun()
+                    else:
+                        st.write(msg["content"])
 
-                # Render sources OUTSIDE chat bubble so markdown links work
-                sources_with_links = msg.get("sources_with_links", [])
-                sources            = msg.get("sources", [])
-                content            = msg.get("content", "")
-                # Don't show sources if answer says info not found
+                # Action buttons below each message
+                content = msg.get("content", "")
                 not_found = any(phrase in content for phrase in [
-                    "could not find", "not found", "no relevant", 
+                    "could not find", "not found", "no relevant",
                     "I can only answer", "outside company documents"
                 ])
+
+                # Sources for assistant messages
+                sources_with_links = msg.get("sources_with_links", [])
+                sources            = msg.get("sources", [])
                 if msg["role"] == "assistant" and (sources_with_links or sources) and not not_found:
                     if sources_with_links:
                         parts = []
                         for i, s in enumerate(sources_with_links):
                             label = s["label"]
                             url   = s.get("url", "")
-                            if url:
-                                parts.append(f"[[{i+1}] {label}]({url})")
-                            else:
-                                parts.append(f"[{i+1}] {label}")
+                            parts.append(f"[[{i+1}] {label}]({url})" if url else f"[{i+1}] {label}")
                         st.markdown("**Sources:** " + "  ·  ".join(parts))
                     elif sources:
                         parts = [f"[{i+1}] {s}" for i, s in enumerate(sources)]
                         st.markdown("**Sources:** " + "  ·  ".join(parts))
+
+                # Action buttons — copy, edit (user only), resend (user only)
+                if st.session_state.rag_editing_idx != idx:
+                    btn_cols = st.columns(4, gap="small")
+                    with btn_cols[0]:
+                        if st.button("📋 Copy", key=f"copy_{idx}", use_container_width=True,
+                                     help="Copy to clipboard"):
+                            st.session_state[f"copied_{idx}"] = True
+                            # Use JS to copy to clipboard
+                            st.session_state[f"copy_text_{idx}"] = content
+                            st.toast("✓ Copied to clipboard!")
+                            st.toast("Copied!")
+                    if msg["role"] == "user":
+                        with btn_cols[1]:
+                            if st.button("✏️ Edit", key=f"edit_{idx}", use_container_width=True,
+                                         help="Edit this message"):
+                                st.session_state.rag_editing_idx = idx
+                                st.rerun()
+                        with btn_cols[2]:
+                            if st.button("🔄 Resend", key=f"resend_direct_{idx}",
+                                         use_container_width=True, help="Resend this message"):
+                                # Remove all messages after this one and resend
+                                st.session_state.rag_messages = st.session_state.rag_messages[:idx+1]
+                                dept = st.session_state.rag_filter_dept
+                                with st.spinner("Searching docs…"):
+                                    data, err = api("post", "/rag/chat", json={
+                                        "query":        msg["content"],
+                                        "top_k":        5,
+                                        "industry":     None if dept == "All" else dept,
+                                        "chat_history": _build_history_payload(),
+                                        "run_eval":     st.session_state.rag_inspector_open,
+                                    })
+                                if err:
+                                    st.session_state.rag_messages.append({"role":"assistant","content":f"❌ {err}","sources":[]})
+                                else:
+                                    chunks = data.get("chunks", [])
+                                    sources_with_links = []
+                                    seen_sources = set()
+                                    for c in chunks:
+                                        label = f"{c.get('doc_title','')} → {c.get('section_heading','')}" if c.get("section_heading") else c.get("doc_title","")
+                                        pid   = c.get("page_id", "")
+                                        url   = f"https://notion.so/{pid.replace('-','')}" if pid else ""
+                                        if label not in seen_sources:
+                                            seen_sources.add(label)
+                                            sources_with_links.append({"label": label, "url": url})
+                                    st.session_state.rag_messages.append({
+                                        "role": "assistant", "content": data["answer"],
+                                        "sources": data["sources"], "sources_with_links": sources_with_links,
+                                    })
+                                    st.session_state.rag_last_chunks = chunks
+                                    st.session_state.rag_last_scores = data.get("ragas_scores")
+                                st.rerun()
 
     # ── Inspector ─────────────────────────────────────────────
     if insp_col:

@@ -39,7 +39,7 @@ CHAT_DEPLOYMENT = os.getenv("AZURE_LLM_DEPLOYMENT_41_MINI", "gpt-4o-mini")
 # ── System persona — injected into EVERY LLM call ───────────────────────────
 # Single source of truth for what CiteRAG is and what it will/won't do.
 CITERAG_SYSTEM = (
-    "You are CiteRAG, a document Q&A assistant  "
+    "You are CiteRAG, a document Q&A assistant"
     "internal company documents stored in the Notion library.\n\n"
     "Your ONLY purpose is to answer questions about company policies, HR, security, "
     "finance, compliance, legal, contracts, and operational documents.\n\n"
@@ -557,7 +557,13 @@ def rag_query(
 
     # PATH 1 — No retrieval needed (greetings / meta questions)
     if path == "no_retrieval":
-        messages = [{"role": "system", "content": CITERAG_SYSTEM}]
+        messages = [{"role": "system", "content": (
+            "You are CiteRAG, a helpful document Q&A assistant for Company Documents. "
+            "Respond warmly to greetings and questions about what you can do. "
+            "Tell users you can answer questions about company policies, HR, security, "
+            "compliance, finance, contracts, and other company documents. "
+            "Keep responses short and friendly."
+        )}]
         if chat_history:
             for msg in chat_history[-6:]:
                 if msg.get("role") in ("user", "assistant") and msg.get("content", "").strip():
@@ -576,7 +582,7 @@ def rag_query(
     # PATH 0 — Out of scope (coding, general knowledge, off-topic)
     if path == "out_of_scope":
         answer = (
-            "I'm CiteRAG — a document Q&A assistant for company policies and documents. "
+            "I'm CiteRAG — a document Q&A assistant for Company Documents. "
             "I can only answer questions about your Notion document library. "
             "Try asking about HR policies, security controls, compliance requirements, or contracts."
         )
