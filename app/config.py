@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     # Notion
     notion_api_key: str = ""
     notion_database_id: str = ""
-    
+    notion_ticket_db_id: str = ""
     # Redis
     redis_url: str = "redis://localhost:6379/0"
     class Config:

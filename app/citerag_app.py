@@ -1,6 +1,11 @@
 import streamlit as st
 import requests
+import logging
+import os
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
 
 API_BASE = "http://localhost:8000"
 
@@ -17,45 +22,36 @@ DEFAULTS = {
     "rag_inspector_open":  False,
     "rag_last_chunks":     [],
     "rag_sync_status":     None,
-    "rag_history":         [],     # [{id, title, messages, chunks, created_at}]
+    "rag_history":         [],
     "rag_chat_title":      "New Chat",
     "rag_editing_title":   False,
     "rag_filter_industry": "All",
-    "rag_filter_dept":     "All",   # department filter from /departments/
-    "_cached_industries":  None,    # cached once per session
-    "_cached_status":      None,    # cached once per session
-    "rag_last_scores":     None,    # last RAGAS scores
-    "rag_editing_idx":     None,    # index of message being edited
-    "rag_edit_text":       "",      # text in edit input
-    "rag_rename_idx":      None,   # index of history item being renamed
+    "rag_filter_dept":     "All",
+    "_cached_industries":  None,
+    "_cached_status":      None,
+    "rag_last_scores":     None,
+    "rag_editing_idx":     None,
+    "rag_edit_text":       "",
+    "rag_rename_idx":      None,
+    # New
+    "rag_last_ticket":       None,
+    "rag_tickets_filter":    "All",
+    "rag_eval_scores":       None,
+    "rag_eval_query":        "",
+    "rag_session_id":        None,
+    "rag_pending_tickets":    [],
+    "rag_awaiting_selection": False,
+    "rag_last_created_ticket": None,  # {ticket_id, notion_url, priority} — for updates
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-INDUSTRIES = ["All", "IT & Security", "Finance", "Human Resources",
-              "Product Management", "Engineering", "Legal & Compliance",
-              "Sales & Marketing", "Business Ops"]
+# Auto-generate session ID if not set
+if not st.session_state.rag_session_id:
+    import uuid
+    st.session_state.rag_session_id = str(uuid.uuid4())
 
-# ── Fetch industries from FastAPI — cached in session ─────────
-def fetch_industries() -> list[str]:
-    """Returns unique industry values — cached in session state."""
-    if st.session_state._cached_industries is not None:
-        return st.session_state._cached_industries
-    data, err = api("get", "/rag/industries")
-    result = data.get("industries", []) if (data and not err) else []
-    st.session_state._cached_industries = result
-    return result
-
-
-def fetch_rag_status() -> dict:
-    """Returns RAG status — cached in session state, refreshed after sync."""
-    if st.session_state._cached_status is not None:
-        return st.session_state._cached_status
-    data, _ = api("get", "/rag/status")
-    result = data or {}
-    st.session_state._cached_status = result
-    return result
 
 # ── API helper ────────────────────────────────────────────────
 def api(method, path, **kwargs):
@@ -72,8 +68,26 @@ def api(method, path, **kwargs):
     except Exception as e:
         return None, str(e)
 
+
+def fetch_industries() -> list[str]:
+    if st.session_state._cached_industries is not None:
+        return st.session_state._cached_industries
+    data, err = api("get", "/rag/industries")
+    result = data.get("industries", []) if (data and not err) else []
+    st.session_state._cached_industries = result
+    return result
+
+
+def fetch_rag_status() -> dict:
+    if st.session_state._cached_status is not None:
+        return st.session_state._cached_status
+    data, _ = api("get", "/rag/status")
+    result = data or {}
+    st.session_state._cached_status = result
+    return result
+
+
 def _save_current_chat():
-    """Save the current chat to history before starting a new one."""
     msgs = st.session_state.rag_messages
     if not msgs:
         return
@@ -89,8 +103,8 @@ def _save_current_chat():
         "created_at": datetime.now().strftime("%b %d, %H:%M"),
     })
 
+
 def _load_chat(idx: int):
-    """Load a history item back into the active chat."""
     item = st.session_state.rag_history[idx]
     st.session_state.rag_messages    = item["messages"].copy()
     st.session_state.rag_last_chunks = item["chunks"].copy()
@@ -99,7 +113,6 @@ def _load_chat(idx: int):
 
 
 def _build_history_payload() -> list[dict]:
-    """Build chat history payload for the API — last 6 messages excluding current."""
     msgs = st.session_state.rag_messages
     history = []
     for m in msgs[-6:]:
@@ -109,10 +122,133 @@ def _build_history_payload() -> list[dict]:
             history.append({"role": role, "content": content})
     return history
 
-# ── Sidebar ───────────────────────────────────────────────────
+
+def _is_ticket_confirmation(text: str) -> bool:
+    """
+    Use LLM to detect if the user wants to confirm ticket creation.
+    Makes a direct Azure OpenAI call — no app module imports needed.
+    """
+    try:
+        from openai import AzureOpenAI
+        import os
+        client = AzureOpenAI(
+            api_key       = os.getenv("AZURE_OPENAI_LLM_KEY"),
+            azure_endpoint= os.getenv("AZURE_LLM_ENDPOINT"),
+            api_version   = os.getenv("AZURE_LLM_API_VERSION", "2024-02-01"),
+        )
+        deployment = os.getenv("AZURE_LLM_DEPLOYMENT_41_MINI", "gpt-4o-mini")
+        prompt = (
+            f"The user was just asked: 'Would you like me to raise a support ticket?'\n"
+            f"Their reply was: \"{text.strip()}\"\n\n"
+            f"Does their reply mean YES they want the ticket created?\n"
+            f"Consider any affirmative, agreement, or ticket-related intent as YES.\n"
+            f"Consider new questions, greetings, or unrelated replies as NO.\n\n"
+            f"Answer with exactly one word: YES or NO."
+        )
+        resp = client.chat.completions.create(
+            model      = deployment,
+            messages   = [{"role": "user", "content": prompt}],
+            temperature= 0,
+            max_tokens = 5,
+        )
+        result = resp.choices[0].message.content.strip().upper()
+        confirmed = result.startswith("YES")
+        logging.info(f"[confirm_check] input='{text}' llm='{result}' confirmed={confirmed}")
+        return confirmed
+    except Exception as e:
+        logging.error(f"[confirm_check] failed: {e}")
+        return False
+
+
+def _detect_ticket_update(text: str) -> dict | None:
+    """
+    Detect if user wants to update the last created ticket.
+    Returns {priority, status} if update detected, None otherwise.
+    """
+    try:
+        from openai import AzureOpenAI
+        client = AzureOpenAI(
+            api_key        = os.getenv("AZURE_OPENAI_LLM_KEY"),
+            azure_endpoint = os.getenv("AZURE_LLM_ENDPOINT"),
+            api_version    = os.getenv("AZURE_LLM_API_VERSION", "2024-02-01"),
+        )
+        prompt = (
+            f"Does the following message ask to update, modify, or change a ticket's "
+            f"priority or status?\n\n"
+            f"Message: \"{text.strip()}\"\n\n"
+            f"If yes, extract the values. Valid priorities: High, Medium, Low. "
+            f"Valid statuses: Open, In Progress, Resolved.\n\n"
+            f"Respond with JSON only: "
+            f"{{\"is_update\": true/false, \"priority\": \"High/Medium/Low or null\", "
+            f"\"status\": \"Open/In Progress/Resolved or null\"}}\n"
+            f"If not an update request, respond: {{\"is_update\": false, \"priority\": null, \"status\": null}}"
+        )
+        resp = client.chat.completions.create(
+            model       = os.getenv("AZURE_LLM_DEPLOYMENT_41_MINI"),
+            messages    = [{"role": "user", "content": prompt}],
+            temperature = 0,
+            max_tokens  = 60,
+        )
+        import json
+        raw = resp.choices[0].message.content.strip()
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        result = json.loads(clean)
+        if result.get("is_update"):
+            return {
+                "priority": result.get("priority"),
+                "status":   result.get("status"),
+            }
+    except Exception as e:
+        logging.error(f"[update_detect] failed: {e}")
+    return None
+
+
+def _call_graph(
+    query: str,
+    run_eval: bool = False,
+    confirm_ticket: bool = False,
+    session_summary: str = "",
+) -> tuple[dict | None, str | None]:
+    """Call the /chat LangGraph endpoint."""
+    dept = st.session_state.rag_filter_dept
+    return api("post", "/chat", json={
+        "query":           query,
+        "industry":        None if dept == "All" else dept,
+        "doc_type":        "",
+        "chat_history":    _build_history_payload(),
+        "session_summary": session_summary,
+        "run_eval":        run_eval,
+        "confirm_ticket":  confirm_ticket,
+        "session_id":      st.session_state.rag_session_id or "",
+    })
+
+
+def _build_sources_with_links(chunks: list[dict]) -> list[dict]:
+    sources_with_links = []
+    seen = set()
+    for c in chunks:
+        label = (f"{c.get('doc_title','')} → {c.get('section_heading','')}"
+                 if c.get("section_heading") else c.get("doc_title", ""))
+        pid  = c.get("page_id", "")
+        url  = f"https://notion.so/{pid.replace('-','')}" if pid else ""
+        if label not in seen:
+            seen.add(label)
+            sources_with_links.append({"label": label, "url": url})
+    return sources_with_links
+
+
+# ── Priority badge ─────────────────────────────────────────────
+def _priority_badge(priority: str) -> str:
+    return {"High": "🔴 High", "Medium": "🟡 Medium", "Low": "🟢 Low"}.get(priority, priority)
+
+
+def _status_badge(status: str) -> str:
+    return {"Open": "🔵 Open", "In Progress": "🟡 In Progress", "Resolved": "✅ Resolved"}.get(status, status)
+
+
+# ── Sidebar ────────────────────────────────────────────────────
 def render_sidebar():
     with st.sidebar:
-        # App switcher
         choice = st.selectbox(
             "Change App",
             ["🔍  CiteRAG Lab", "📋  DocForge"],
@@ -125,12 +261,10 @@ def render_sidebar():
         st.divider()
         st.subheader("🔍 CiteRAG Lab")
 
-        # ── Sync ──────────────────────────────────────────────
         if st.button("⚡ Sync Knowledge Base", use_container_width=True, key="sync_btn"):
             with st.spinner("Syncing…"):
                 data, err = api("post", "/sync/run")
             st.session_state.rag_sync_status = "error" if err else "ok"
-            # Invalidate status cache so it refreshes after sync
             st.session_state._cached_status = None
             st.session_state._cached_industries = None
             st.rerun()
@@ -139,41 +273,38 @@ def render_sidebar():
         elif st.session_state.rag_sync_status == "error":
             st.error("Sync failed")
 
-        # ── New Chat ──────────────────────────────────────────
         if st.button("＋ New Chat", use_container_width=True, key="new_chat_btn"):
             _save_current_chat()
-            st.session_state.rag_messages      = []
-            st.session_state.rag_last_chunks   = []
-            st.session_state.rag_chat_title    = "New Chat"
-            st.session_state.rag_editing_title = False
+            st.session_state.rag_messages        = []
+            st.session_state.rag_last_chunks     = []
+            st.session_state.rag_chat_title      = "New Chat"
+            st.session_state.rag_editing_title   = False
+            st.session_state.rag_last_ticket     = None
+            st.session_state.rag_pending_tickets    = []
+            st.session_state.rag_awaiting_selection  = False
+            st.session_state.rag_last_created_ticket = None
+            import uuid
+            st.session_state.rag_session_id = str(uuid.uuid4())
             st.rerun()
 
-        # ── Filters ───────────────────────────────────────────
         st.divider()
         st.caption("**Filters**")
-
-        # Industry/Department filter — fetched live from Milvus via API
         industries  = fetch_industries()
         ind_options = ["All"] + industries
-
-        cur_dept = st.session_state.rag_filter_dept
+        cur_dept    = st.session_state.rag_filter_dept
         if cur_dept not in ind_options:
             cur_dept = "All"
-
         st.session_state.rag_filter_dept = st.selectbox(
             "Department", ind_options,
             index=ind_options.index(cur_dept),
             key="fil_dept")
 
-
-        # ── Inspector toggle ──────────────────────────────────
         st.divider()
         st.session_state.rag_inspector_open = st.toggle(
             "Retrieval Inspector",
             value=st.session_state.rag_inspector_open,
             key="insp_tog")
 
-        # ── Chat History ──────────────────────────────────────
         st.divider()
         st.caption("**Chat History**")
         history = st.session_state.rag_history
@@ -182,7 +313,6 @@ def render_sidebar():
             st.caption("_No previous chats yet._")
         else:
             for i, item in enumerate(history[:20]):
-                # Rename mode for this item
                 if st.session_state.rag_rename_idx == i:
                     new_title = st.text_input(
                         "Rename", value=item["title"],
@@ -198,30 +328,22 @@ def render_sidebar():
                             st.session_state.rag_rename_idx = None
                             st.rerun()
                 else:
-                    # Normal display
                     label = item.get("title", "Chat")
                     meta  = item.get("created_at", "")
-
-                    # Load button
                     if st.button(f"💬 {label}", key=f"load_chat_{i}",
                                  use_container_width=True, help=meta):
                         _load_chat(i)
                         st.rerun()
-
-                    # Rename + Delete inline
                     rc1, rc2 = st.columns(2, gap="small")
                     with rc1:
-                        if st.button("✏️ Rename", key=f"rename_btn_{i}",
-                                     use_container_width=True):
+                        if st.button("✏️ Rename", key=f"rename_btn_{i}", use_container_width=True):
                             st.session_state.rag_rename_idx = i
                             st.rerun()
                     with rc2:
-                        if st.button("🗑 Delete", key=f"delete_btn_{i}",
-                                     use_container_width=True):
+                        if st.button("🗑 Delete", key=f"delete_btn_{i}", use_container_width=True):
                             st.session_state.rag_history.pop(i)
                             st.rerun()
 
-        # ── Status ────────────────────────────────────────────
         st.divider()
         st.caption("**Status**")
         status_data = fetch_rag_status()
@@ -232,7 +354,7 @@ def render_sidebar():
         st.caption(f"📚 Docs indexed — {count}")
 
 
-# ── Main page ─────────────────────────────────────────────────
+# ── Tab 1: Chat ────────────────────────────────────────────────
 RAG_SUGGESTIONS = [
     "What are the key risks in the Security Risk Assessment?",
     "What financial controls are in place?",
@@ -241,12 +363,112 @@ RAG_SUGGESTIONS = [
     "What vulnerabilities were identified in IT infrastructure?",
 ]
 
+def _render_message_sources(msg: dict):
+    """Render clickable source links below an assistant message."""
+    content = msg.get("content", "")
+    not_found = any(phrase in content.lower() for phrase in [
+        "could not find",
+        "not found",
+        "no relevant",
+        "i can only answer",
+        "outside company documents",
+        "wasn't able to find",
+        "would you like me to raise",
+        "support ticket created",
+    ])
+    sources_with_links = msg.get("sources_with_links", [])
+    sources            = msg.get("sources", [])
+    if sources_with_links and not not_found:
+        parts = []
+        for i, s in enumerate(sources_with_links):
+            label = s["label"]
+            url   = s.get("url", "")
+            parts.append(f"[[{i+1}] {label}]({url})" if url else f"[{i+1}] {label}")
+        st.markdown("**Sources:** " + "  ·  ".join(parts))
+    elif sources and not not_found:
+        parts = [f"[{i+1}] {s}" for i, s in enumerate(sources)]
+        st.markdown("**Sources:** " + "  ·  ".join(parts))
+
+    # Ticket confirmation inline
+    ticket = msg.get("ticket")
+    if ticket and ticket.get("ticket_status") not in (None, "pending_confirmation"):
+        notion_url = ticket.get("notion_url", "")
+        st.success(
+            f"🎫 Ticket **{ticket.get('title', ticket.get('ticket_id',''))}** created "
+            f"| Priority: {_priority_badge(ticket.get('priority',''))} "
+            + (f"| [View in Notion]({notion_url})" if notion_url else "")
+        )
+
+
+def _handle_graph_response(data: dict, query: str):
+    """Process /chat response and append assistant message to session."""
+    chunks        = data.get("chunks", [])
+    can_answer    = data.get("can_answer", True)
+    ticket_id     = data.get("ticket_id")
+    ticket_status = data.get("ticket_status")
+
+    sources_with_links = _build_sources_with_links(chunks)
+
+    # ── Track pending unanswered questions ────────────────────
+    if ticket_status == "pending_confirmation":
+        # Add to pending list if not already there
+        pending = st.session_state.rag_pending_tickets
+        already = any(p["question"] == query for p in pending)
+        if not already:
+            pending.append({
+                "question":  query,
+                "timestamp": datetime.now().strftime("%H:%M"),
+            })
+            st.session_state.rag_pending_tickets = pending
+
+    # ── Build ticket info for inline display ──────────────────
+    ticket_info = None
+    if ticket_id:
+        ticket_info = {
+            "ticket_id":  ticket_id,
+            "title":      ticket_id,
+            "priority":   data.get("priority", ""),
+            "notion_url": f"https://notion.so/{ticket_id.replace('-','')}",
+            "status":     ticket_status,
+        }
+        st.session_state.rag_last_ticket = ticket_info
+        # Store for potential update
+        st.session_state.rag_last_created_ticket = {
+            "ticket_id":  ticket_id,
+            "notion_url": f"https://notion.so/{ticket_id.replace('-','')}",
+            "priority":   data.get("priority", ""),
+        }
+        # Remove from pending once ticket is created
+        created_question = query
+        st.session_state.rag_pending_tickets = [
+            p for p in st.session_state.rag_pending_tickets
+            if p["question"] != created_question
+        ]
+
+    msg = {
+        "role":               "assistant",
+        "content":            data["answer"],
+        "sources":            data.get("sources", []),
+        "sources_with_links": sources_with_links,
+        "ticket":             ticket_info,
+        "ticket_status":      ticket_status,
+        "path":               data.get("path", ""),
+        "can_answer":         can_answer,
+    }
+    st.session_state.rag_messages.append(msg)
+    st.session_state.rag_last_chunks = chunks
+    st.session_state.rag_last_scores = data.get("ragas_scores")
+
+    if st.session_state.rag_chat_title == "New Chat":
+        st.session_state.rag_chat_title = query[:46] + ("…" if len(query) > 46 else "")
+
+
 def page_chat():
     messages  = st.session_state.rag_messages
     inspector = st.session_state.rag_inspector_open
     dept      = st.session_state.rag_filter_dept
 
-    # ── Chat title bar ────────────────────────────────────────
+    # ── Chat title bar ─────────────────────────────────────────
     t_col, e_col = st.columns([8, 1], gap="small")
     with t_col:
         if st.session_state.rag_editing_title:
@@ -265,14 +487,11 @@ def page_chat():
                 st.session_state.rag_editing_title = True
                 st.rerun()
 
-    # ── Active filters display ────────────────────────────────
-    dept = st.session_state.rag_filter_dept
     if dept != "All":
         st.caption(f"Filters active: 🏢 {dept}")
 
     st.divider()
 
-    # ── Layout ────────────────────────────────────────────────
     if inspector:
         chat_col, insp_col = st.columns([3, 2], gap="large")
     else:
@@ -300,173 +519,87 @@ def page_chat():
                     with col:
                         if st.button(q, key=key, use_container_width=True):
                             st.session_state.rag_messages.append(
-                                {"role":"user","content":q,"sources":[]})
+                                {"role": "user", "content": q, "sources": []})
                             with st.spinner("Searching docs…"):
-                                data, err = api("post", "/rag/chat", json={
-                                    "query":        q,
-                                    "top_k":        5,
-                                    "industry":     None if dept == "All" else dept,
-                                    "chat_history": _build_history_payload(),
-                                })
+                                data, err = _call_graph(q, run_eval=inspector)
                             if err:
                                 st.session_state.rag_messages.append(
-                                    {"role":"assistant","content":f"❌ {err}","sources":[]})
+                                    {"role": "assistant", "content": f"❌ {err}", "sources": []})
                             else:
-                                st.session_state.rag_messages.append({
-                                    "role":    "assistant",
-                                    "content": data["answer"],
-                                    "sources": data["sources"],
-                                })
-                                st.session_state.rag_last_chunks = data.get("chunks", [])
-                                # Auto-set title from first question
-                                if st.session_state.rag_chat_title == "New Chat":
-                                    st.session_state.rag_chat_title = q[:46] + ("…" if len(q) > 46 else "")
+                                _handle_graph_response(data, q)
                             st.rerun()
         else:
             for idx, msg in enumerate(messages):
                 with st.chat_message(msg["role"]):
-                    # Edit mode for this message
                     if st.session_state.rag_editing_idx == idx and msg["role"] == "user":
                         edited = st.text_area(
-                            "Edit message",
-                            value=msg["content"],
-                            key=f"edit_input_{idx}",
-                            label_visibility="collapsed"
-                        )
+                            "Edit message", value=msg["content"],
+                            key=f"edit_input_{idx}", label_visibility="collapsed")
                         col_save, col_cancel = st.columns(2, gap="small")
                         with col_save:
-                            if st.button("✓ Resend", key=f"resend_{idx}", use_container_width=True, type="primary"):
-                                # Update message and remove all messages after this one
+                            if st.button("✓ Resend", key=f"resend_{idx}",
+                                         use_container_width=True, type="primary"):
                                 st.session_state.rag_messages[idx]["content"] = edited
                                 st.session_state.rag_messages = st.session_state.rag_messages[:idx+1]
                                 st.session_state.rag_editing_idx = None
-                                # Resend the edited query
-                                dept = st.session_state.rag_filter_dept
                                 with st.spinner("Searching docs…"):
-                                    data, err = api("post", "/rag/chat", json={
-                                        "query":        edited,
-                                        "top_k":        5,
-                                        "industry":     None if dept == "All" else dept,
-                                        "chat_history": _build_history_payload(),
-                                        "run_eval":     st.session_state.rag_inspector_open,
-                                    })
+                                    data, err = _call_graph(edited, run_eval=inspector)
                                 if err:
-                                    st.session_state.rag_messages.append({"role":"assistant","content":f"❌ {err}","sources":[]})
+                                    st.session_state.rag_messages.append(
+                                        {"role": "assistant", "content": f"❌ {err}", "sources": []})
                                 else:
-                                    chunks = data.get("chunks", [])
-                                    sources_with_links = []
-                                    seen_sources = set()
-                                    for c in chunks:
-                                        label = f"{c.get('doc_title','')} → {c.get('section_heading','')}" if c.get("section_heading") else c.get("doc_title","")
-                                        pid   = c.get("page_id", "")
-                                        url   = f"https://notion.so/{pid.replace('-','')}" if pid else ""
-                                        if label not in seen_sources:
-                                            seen_sources.add(label)
-                                            sources_with_links.append({"label": label, "url": url})
-                                    st.session_state.rag_messages.append({
-                                        "role": "assistant", "content": data["answer"],
-                                        "sources": data["sources"], "sources_with_links": sources_with_links,
-                                    })
-                                    st.session_state.rag_last_chunks = chunks
-                                    st.session_state.rag_last_scores = data.get("ragas_scores")
+                                    _handle_graph_response(data, edited)
                                 st.rerun()
                         with col_cancel:
-                            if st.button("✕ Cancel", key=f"cancel_edit_{idx}", use_container_width=True):
+                            if st.button("✕ Cancel", key=f"cancel_edit_{idx}",
+                                         use_container_width=True):
                                 st.session_state.rag_editing_idx = None
                                 st.rerun()
                     else:
-                        st.write(msg["content"])
+                        st.markdown(msg["content"])
 
-                # Action buttons below each message
-                content = msg.get("content", "")
-                not_found = any(phrase in content for phrase in [
-                    "could not find", "not found", "no relevant",
-                    "I can only answer", "outside company documents"
-                ])
+                _render_message_sources(msg)
 
-                # Sources for assistant messages
-                sources_with_links = msg.get("sources_with_links", [])
-                sources            = msg.get("sources", [])
-                if msg["role"] == "assistant" and (sources_with_links or sources) and not not_found:
-                    if sources_with_links:
-                        parts = []
-                        for i, s in enumerate(sources_with_links):
-                            label = s["label"]
-                            url   = s.get("url", "")
-                            parts.append(f"[[{i+1}] {label}]({url})" if url else f"[{i+1}] {label}")
-                        st.markdown("**Sources:** " + "  ·  ".join(parts))
-                    elif sources:
-                        parts = [f"[{i+1}] {s}" for i, s in enumerate(sources)]
-                        st.markdown("**Sources:** " + "  ·  ".join(parts))
-
-                # Action buttons — copy, edit (user only), resend (user only)
+                # Action buttons
                 if st.session_state.rag_editing_idx != idx:
                     btn_cols = st.columns(4, gap="small")
                     with btn_cols[0]:
-                        if st.button("📋 Copy", key=f"copy_{idx}", use_container_width=True,
-                                     help="Copy to clipboard"):
-                            st.session_state[f"copied_{idx}"] = True
-                            # Use JS to copy to clipboard
-                            st.session_state[f"copy_text_{idx}"] = content
-                            st.toast("✓ Copied to clipboard!")
-                            st.toast("Copied!")
+                        if st.button("📋 Copy", key=f"copy_{idx}",
+                                     use_container_width=True):
+                            st.toast("✓ Copied!")
                     if msg["role"] == "user":
                         with btn_cols[1]:
-                            if st.button("✏️ Edit", key=f"edit_{idx}", use_container_width=True,
-                                         help="Edit this message"):
+                            if st.button("✏️ Edit", key=f"edit_{idx}",
+                                         use_container_width=True):
                                 st.session_state.rag_editing_idx = idx
                                 st.rerun()
                         with btn_cols[2]:
                             if st.button("🔄 Resend", key=f"resend_direct_{idx}",
-                                         use_container_width=True, help="Resend this message"):
-                                # Remove all messages after this one and resend
+                                         use_container_width=True):
                                 st.session_state.rag_messages = st.session_state.rag_messages[:idx+1]
-                                dept = st.session_state.rag_filter_dept
                                 with st.spinner("Searching docs…"):
-                                    data, err = api("post", "/rag/chat", json={
-                                        "query":        msg["content"],
-                                        "top_k":        5,
-                                        "industry":     None if dept == "All" else dept,
-                                        "chat_history": _build_history_payload(),
-                                        "run_eval":     st.session_state.rag_inspector_open,
-                                    })
+                                    data, err = _call_graph(msg["content"], run_eval=inspector)
                                 if err:
-                                    st.session_state.rag_messages.append({"role":"assistant","content":f"❌ {err}","sources":[]})
+                                    st.session_state.rag_messages.append(
+                                        {"role": "assistant", "content": f"❌ {err}", "sources": []})
                                 else:
-                                    chunks = data.get("chunks", [])
-                                    sources_with_links = []
-                                    seen_sources = set()
-                                    for c in chunks:
-                                        label = f"{c.get('doc_title','')} → {c.get('section_heading','')}" if c.get("section_heading") else c.get("doc_title","")
-                                        pid   = c.get("page_id", "")
-                                        url   = f"https://notion.so/{pid.replace('-','')}" if pid else ""
-                                        if label not in seen_sources:
-                                            seen_sources.add(label)
-                                            sources_with_links.append({"label": label, "url": url})
-                                    st.session_state.rag_messages.append({
-                                        "role": "assistant", "content": data["answer"],
-                                        "sources": data["sources"], "sources_with_links": sources_with_links,
-                                    })
-                                    st.session_state.rag_last_chunks = chunks
-                                    st.session_state.rag_last_scores = data.get("ragas_scores")
+                                    _handle_graph_response(data, msg["content"])
                                 st.rerun()
 
-    # ── Inspector ─────────────────────────────────────────────
+    # ── Inspector panel ────────────────────────────────────────
     if insp_col:
         with insp_col:
             st.subheader("🔎 Retrieval Inspector")
-
-            # ── RAGAS Scores ──────────────────────────────────
             scores = st.session_state.rag_last_scores
             if scores:
                 st.markdown("**📊 RAGAS Scores**")
-                metrics = [
-                    ("Faithfulness",      scores.get("faithfulness")),
-                    ("Answer Relevancy",  scores.get("answer_relevancy")),
-                    ("Context Precision", scores.get("context_precision")),
-                    ("Context Recall",    scores.get("context_recall")),
-                ]
-                for name, val in metrics:
+                for name, key in [
+                    ("Faithfulness",      "faithfulness"),
+                    ("Answer Relevancy",  "answer_relevancy"),
+                    ("Context Precision", "context_precision"),
+                    ("Context Recall",    "context_recall"),
+                ]:
+                    val = scores.get(key)
                     if val is not None:
                         emoji = "🟢" if val >= 0.8 else ("🟡" if val >= 0.6 else "🔴")
                         st.progress(val, text=f"{emoji} {name}: {val:.2f}")
@@ -474,7 +607,6 @@ def page_chat():
                         st.caption(f"⚪ {name}: N/A")
                 st.divider()
 
-            # ── Retrieved Chunks ──────────────────────────────
             chunks = st.session_state.rag_last_chunks
             if not chunks:
                 st.info("Ask a question to see retrieved chunks.")
@@ -488,53 +620,405 @@ def page_chat():
                     with st.expander(f"#{i} · {meta}  —  {score:.3f}"):
                         st.caption(text[:300] + ("…" if len(text) > 300 else ""))
 
-    # ── Chat input ────────────────────────────────────────────
-    dept = st.session_state.rag_filter_dept
+    # ── Chat input ─────────────────────────────────────────────
     hint = f" [{dept}]" if dept != "All" else ""
     user_input = st.chat_input(f"Ask a question about your docs{hint}…")
     if user_input:
         st.session_state.rag_messages.append(
-            {"role":"user","content":user_input,"sources":[]})
-        dept = st.session_state.rag_filter_dept
-        with st.spinner("Searching docs and generating answer…"):
-            data, err = api("post", "/rag/chat", json={
-                "query":        user_input,
-                "top_k":        5,
-                "industry":     None if dept == "All" else dept,
-                "chat_history": _build_history_payload(),
-                "run_eval":     st.session_state.rag_inspector_open,
+            {"role": "user", "content": user_input, "sources": []})
+
+        # ── Check last bot message state ──────────────────────
+        last_bot = next(
+            (m for m in reversed(st.session_state.rag_messages[:-1])
+             if m["role"] == "assistant"), None
+        )
+        last_status = last_bot.get("ticket_status") if last_bot else None
+        pending     = st.session_state.rag_pending_tickets
+
+        # ── Detect if user wants to create a ticket (UI-level check) ──
+        # This runs BEFORE sending to API when pending tickets exist
+        wants_ticket = (
+            pending and (
+                last_status == "pending_confirmation" or
+                last_status == "awaiting_selection"
+            ) and _is_ticket_confirmation(user_input)
+        )
+
+        # Also intercept explicit "create ticket" phrases when pending exist
+        if not wants_ticket and pending:
+            ticket_phrases = ["create ticket", "create a ticket", "raise ticket",
+                              "raise a ticket", "creat ticket", "make ticket",
+                              "open ticket", "log ticket", "submit ticket"]
+            wants_ticket = any(p in user_input.lower() for p in ticket_phrases)
+
+        # ── Case 1: Waiting for ticket selection (multiple pending) ──
+        if st.session_state.rag_awaiting_selection:
+            selected_question = None
+            stripped = user_input.strip()
+
+            if stripped.isdigit():
+                idx = int(stripped) - 1
+                if 0 <= idx < len(pending):
+                    selected_question = pending[idx]["question"]
+            else:
+                try:
+                    from openai import AzureOpenAI
+                    client = AzureOpenAI(
+                        api_key        = os.getenv("AZURE_OPENAI_LLM_KEY"),
+                        azure_endpoint = os.getenv("AZURE_LLM_ENDPOINT"),
+                        api_version    = os.getenv("AZURE_LLM_API_VERSION", "2024-02-01"),
+                    )
+                    options = "\n".join(f"{i+1}. {p['question']}" for i, p in enumerate(pending))
+                    prompt  = (
+                        f"The user was asked to pick one of these unanswered questions:\n"
+                        f"{options}\n\n"
+                        f"User replied: \"{user_input}\"\n\n"
+                        f"Which number (1-{len(pending)}) are they referring to? "
+                        f"If none match clearly, reply 0."
+                    )
+                    resp = client.chat.completions.create(
+                        model       = os.getenv("AZURE_LLM_DEPLOYMENT_41_MINI"),
+                        messages    = [{"role": "user", "content": prompt}],
+                        temperature = 0,
+                        max_tokens  = 5,
+                    )
+                    num = resp.choices[0].message.content.strip()
+                    if num.isdigit():
+                        idx = int(num) - 1
+                        if 0 <= idx < len(pending):
+                            selected_question = pending[idx]["question"]
+                except Exception as e:
+                    logging.error(f"[selection] LLM failed: {e}")
+
+            if selected_question:
+                st.session_state.rag_awaiting_selection = False
+                with st.spinner("Creating ticket…"):
+                    data, err = _call_graph(
+                        selected_question,
+                        confirm_ticket=True,
+                        session_summary=f"User asked: {selected_question}",
+                    )
+                if err:
+                    st.session_state.rag_messages.append(
+                        {"role": "assistant", "content": f"❌ Error: {err}", "sources": []})
+                else:
+                    st.session_state.rag_pending_tickets = [
+                        p for p in pending if p["question"] != selected_question
+                    ]
+                    _handle_graph_response(data, selected_question)
+            else:
+                options_text = "\n".join(
+                    f"**{i+1}.** {p['question']}" for i, p in enumerate(pending)
+                )
+                st.session_state.rag_messages.append({
+                    "role": "assistant",
+                    "content": f"Please reply with a number:\n\n{options_text}",
+                    "sources": [], "ticket_status": "awaiting_selection",
+                })
+            st.rerun()
+
+        # ── Case 2: User wants to create ticket + pending questions exist ──
+        elif wants_ticket and pending:
+            if len(pending) == 1:
+                # Only one — create directly
+                question = pending[0]["question"]
+                with st.spinner("Creating ticket…"):
+                    data, err = _call_graph(
+                        question,
+                        confirm_ticket=True,
+                        session_summary=f"User asked: {question}",
+                    )
+                if err:
+                    st.session_state.rag_messages.append(
+                        {"role": "assistant", "content": f"❌ Error: {err}", "sources": []})
+                else:
+                    st.session_state.rag_pending_tickets = []
+                    _handle_graph_response(data, question)
+            else:
+                # Multiple — show selection
+                st.session_state.rag_awaiting_selection = True
+                options_text = "\n".join(
+                    f"**{i+1}.** {p['question']}" for i, p in enumerate(pending)
+                )
+                st.session_state.rag_messages.append({
+                    "role": "assistant",
+                    "content": (
+                        f"You have **{len(pending)} unanswered questions**. "
+                        f"Which one should I raise a ticket for?\n\n"
+                        f"{options_text}\n\n"
+                        f"_Reply with the number or describe which one._"
+                    ),
+                    "sources": [], "ticket_status": "awaiting_selection",
+                })
+            st.rerun()
+
+        # ── Case 3: Normal query ───────────────────────────────
+        else:
+            st.session_state.rag_awaiting_selection = False
+
+            # Check if user wants to update the last created ticket
+            last_ticket = st.session_state.rag_last_created_ticket
+            if last_ticket:
+                update = _detect_ticket_update(user_input)
+                if update and (update.get("priority") or update.get("status")):
+                    ticket_id  = last_ticket["ticket_id"]
+                    notion_url = last_ticket["notion_url"]
+                    payload = {}
+                    if update.get("priority"):
+                        payload["priority"] = update["priority"]
+                    if update.get("status"):
+                        payload["status"] = update["status"]
+
+                    data, err = api("patch", f"/tickets/{ticket_id}", json=payload)
+                    if err:
+                        st.session_state.rag_messages.append({
+                            "role": "assistant",
+                            "content": f"❌ Failed to update ticket: {err}",
+                            "sources": [],
+                        })
+                    else:
+                        changes = []
+                        if update.get("priority"):
+                            changes.append(f"Priority → **{update['priority']}**")
+                            st.session_state.rag_last_created_ticket["priority"] = update["priority"]
+                        if update.get("status"):
+                            changes.append(f"Status → **{update['status']}**")
+                        short_id = ticket_id.split("-")[0] if ticket_id else ticket_id
+                        st.session_state.rag_messages.append({
+                            "role": "assistant",
+                            "content": (
+                                f"✅ Ticket **`{short_id}...`** updated successfully!\n\n"
+                                f"{chr(10).join(changes)}\n\n"
+                                f"[View ticket in Notion ↗]({notion_url})"
+                            ),
+                            "sources": [],
+                        })
+                    st.rerun()
+
+            with st.spinner("Searching docs and generating answer…"):
+                data, err = _call_graph(user_input, run_eval=inspector)
+            if err:
+                st.session_state.rag_messages.append(
+                    {"role": "assistant", "content": f"❌ Error: {err}", "sources": []})
+            else:
+                _handle_graph_response(data, user_input)
+            st.rerun()
+
+
+# ── Tab 2: Retrieval Inspector ─────────────────────────────────
+def page_retrieval_inspector():
+    st.subheader("🔎 Retrieval Inspector")
+    st.caption("Detailed view of chunks retrieved for the last query.")
+
+    chunks = st.session_state.rag_last_chunks
+    scores = st.session_state.rag_last_scores
+
+    if not chunks:
+        st.info("Ask a question in the Chat tab first to see retrieval details here.")
+        return
+
+    # RAGAS scores
+    if scores:
+        st.markdown("#### 📊 RAGAS Quality Scores")
+        c1, c2, c3, c4 = st.columns(4)
+        for col, name, key in [
+            (c1, "Faithfulness",      "faithfulness"),
+            (c2, "Answer Relevancy",  "answer_relevancy"),
+            (c3, "Context Precision", "context_precision"),
+            (c4, "Context Recall",    "context_recall"),
+        ]:
+            val = scores.get(key)
+            with col:
+                if val is not None:
+                    emoji = "🟢" if val >= 0.8 else ("🟡" if val >= 0.6 else "🔴")
+                    st.metric(label=f"{emoji} {name}", value=f"{val:.2f}")
+                else:
+                    st.metric(label=f"⚪ {name}", value="N/A")
+        st.divider()
+
+    # Chunk details
+    st.markdown(f"#### 📄 Retrieved Chunks ({len(chunks)})")
+    for i, c in enumerate(chunks, 1):
+        doc_t = c.get("doc_title", "Unknown")
+        sec   = c.get("section_heading", "")
+        score = c.get("score", 0.0)
+        text  = c.get("raw_text", "")
+        pid   = c.get("page_id", "")
+        meta  = f"{doc_t} → {sec}" if sec else doc_t
+        url   = f"https://notion.so/{pid.replace('-','')}" if pid else ""
+
+        with st.expander(f"#{i} · {meta}  —  score: {score:.4f}"):
+            col_text, col_meta = st.columns([3, 1])
+            with col_text:
+                st.markdown(f"```\n{text[:600]}{'…' if len(text) > 600 else ''}\n```")
+            with col_meta:
+                st.caption(f"**Doc:** {doc_t}")
+                st.caption(f"**Section:** {sec or '—'}")
+                st.caption(f"**Score:** {score:.4f}")
+                if url:
+                    st.markdown(f"[Open in Notion]({url})")
+
+
+# ── Tab 3: My Tickets ──────────────────────────────────────────
+def page_tickets():
+    st.subheader("🎫 My Tickets")
+    st.caption("Support tickets created when CiteRAG couldn't answer a question.")
+
+    # Status filter
+    col_filter, col_refresh = st.columns([3, 1])
+    with col_filter:
+        status_options = ["All", "Open", "In Progress", "Resolved"]
+        selected_status = st.selectbox(
+            "Filter by status",
+            status_options,
+            index=status_options.index(st.session_state.rag_tickets_filter),
+            key="tickets_status_filter",
+            label_visibility="collapsed",
+        )
+        st.session_state.rag_tickets_filter = selected_status
+
+    with col_refresh:
+        refresh = st.button("🔄 Refresh", use_container_width=True, key="tickets_refresh")
+
+    # Fetch tickets
+    path = "/tickets" if selected_status == "All" else f"/tickets?status={selected_status}"
+    data, err = api("get", path)
+
+    if err:
+        st.error(f"Failed to load tickets: {err}")
+        return
+
+    tickets = data or []
+
+    if not tickets:
+        st.info("No tickets found." if selected_status == "All" else f"No {selected_status} tickets found.")
+        return
+
+    st.caption(f"{len(tickets)} ticket(s) found")
+    st.divider()
+
+    for t in tickets:
+        priority    = t.get("priority", "")
+        status      = t.get("status", "")
+        title       = t.get("title", t.get("ticket_id", ""))
+        question    = t.get("question", "")
+        industry    = t.get("industry", "")
+        doc_type    = t.get("doc_type", "")
+        attempts    = t.get("retrieved_attempts", "")
+        summary     = t.get("session_summary", "")
+        notion_url  = t.get("notion_url", "")
+
+        with st.expander(
+            f"{_priority_badge(priority)}  ·  {_status_badge(status)}  ·  **{title}**  —  {question[:80]}{'…' if len(question) > 80 else ''}",
+            expanded=False,
+        ):
+            col_q, col_meta = st.columns([3, 1])
+            with col_q:
+                st.markdown(f"**Question:** {question}")
+                if summary:
+                    st.caption(f"**Session context:** {summary}")
+            with col_meta:
+                st.caption(f"**Priority:** {_priority_badge(priority)}")
+                st.caption(f"**Status:** {_status_badge(status)}")
+                if industry:
+                    st.caption(f"**Industry:** {industry}")
+                if doc_type:
+                    st.caption(f"**Doc Type:** {doc_type}")
+                if attempts:
+                    st.caption(f"**Retrieval attempts:** {attempts}")
+                if notion_url:
+                    st.markdown(f"[Open in Notion ↗]({notion_url})")
+
+
+# ── Tab 4: Evaluation Lab ──────────────────────────────────────
+def page_evaluation_lab():
+    st.subheader("📊 Evaluation Lab")
+    st.caption("Run RAGAS evaluation on any query to assess retrieval quality.")
+
+    # Manual eval form
+    with st.form("eval_form"):
+        eval_query = st.text_input(
+            "Query to evaluate",
+            value=st.session_state.rag_eval_query,
+            placeholder="e.g. What is the leave policy for employees?",
+        )
+        col_ind, col_doc = st.columns(2)
+        with col_ind:
+            industries  = fetch_industries()
+            ind_options = ["All"] + industries
+            eval_industry = st.selectbox("Industry filter", ind_options, key="eval_industry")
+        with col_doc:
+            eval_doc_type = st.text_input("Doc type filter (optional)", key="eval_doc_type")
+
+        submitted = st.form_submit_button("▶ Run Evaluation", type="primary", use_container_width=True)
+
+    if submitted and eval_query.strip():
+        st.session_state.rag_eval_query = eval_query
+        with st.spinner("Running RAGAS evaluation — this takes ~30 seconds…"):
+            data, err = api("post", "/chat", json={
+                "query":    eval_query,
+                "industry": None if eval_industry == "All" else eval_industry,
+                "doc_type": eval_doc_type or "",
+                "run_eval": True,
             })
         if err:
-            st.session_state.rag_messages.append(
-                {"role":"assistant","content":f"❌ Error: {err}","sources":[]})
+            st.error(f"Evaluation failed: {err}")
         else:
-            # Build sources with Notion URLs from chunk page_ids
-            chunks  = data.get("chunks", [])
-            sources_with_links = []
-            seen_sources = set()
-            for c in chunks:
-                label = f"{c.get('doc_title','')} → {c.get('section_heading','')}" if c.get("section_heading") else c.get("doc_title","")
-                pid   = c.get("page_id", "")
-                url   = f"https://notion.so/{pid.replace('-','')}" if pid else ""
-                key   = label
-                if key not in seen_sources:
-                    seen_sources.add(key)
-                    sources_with_links.append({"label": label, "url": url})
+            st.session_state.rag_eval_scores = data.get("ragas_scores")
+            st.session_state.rag_last_chunks = data.get("chunks", [])
+            st.success("✓ Evaluation complete")
 
-            st.session_state.rag_messages.append({
-                "role":    "assistant",
-                "content": data["answer"],
-                "sources": data["sources"],
-                "sources_with_links": sources_with_links,
-            })
-            st.session_state.rag_last_chunks = chunks
-            st.session_state.rag_last_scores = data.get("ragas_scores")
-            # Auto-set title from first user message
-            if st.session_state.rag_chat_title == "New Chat":
-                st.session_state.rag_chat_title = user_input[:46] + ("…" if len(user_input) > 46 else "")
-        st.rerun()
+    # Show scores
+    scores = st.session_state.rag_eval_scores
+    if scores:
+        st.divider()
+        st.markdown("#### 📊 RAGAS Scores")
+
+        c1, c2, c3, c4 = st.columns(4)
+        for col, name, key in [
+            (c1, "Faithfulness",      "faithfulness"),
+            (c2, "Answer Relevancy",  "answer_relevancy"),
+            (c3, "Context Precision", "context_precision"),
+            (c4, "Context Recall",    "context_recall"),
+        ]:
+            val = scores.get(key)
+            with col:
+                if val is not None:
+                    emoji = "🟢" if val >= 0.8 else ("🟡" if val >= 0.6 else "🔴")
+                    st.metric(label=f"{emoji} {name}", value=f"{val:.2f}")
+                else:
+                    st.metric(label=f"⚪ {name}", value="N/A")
+
+        st.divider()
+        st.markdown("#### 📄 Retrieved Chunks Used")
+        chunks = st.session_state.rag_last_chunks
+        if chunks:
+            for i, c in enumerate(chunks, 1):
+                doc_t = c.get("doc_title", "")
+                sec   = c.get("section_heading", "")
+                score = c.get("score", 0.0)
+                text  = c.get("raw_text", "")
+                meta  = f"{doc_t} → {sec}" if sec else doc_t
+                with st.expander(f"#{i} · {meta}  —  {score:.4f}"):
+                    st.caption(text[:400] + ("…" if len(text) > 400 else ""))
+        else:
+            st.info("No chunks retrieved for this query.")
 
 
-# ── Run ───────────────────────────────────────────────────────
+# ── Main ───────────────────────────────────────────────────────
 render_sidebar()
-page_chat()
+
+tab_chat, tab_tickets, tab_eval = st.tabs([
+    "💬 Chat",
+    "🎫 My Tickets",
+    "📊 Evaluation Lab",
+])
+
+with tab_chat:
+    page_chat()
+
+with tab_tickets:
+    page_tickets()
+
+with tab_eval:
+    page_evaluation_lab()
