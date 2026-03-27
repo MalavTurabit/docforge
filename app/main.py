@@ -16,6 +16,8 @@ from app.routes.sync import router as sync_router
 from app.rag_config import create_collection_if_not_exists
 from app.routes.chat import router as chat_router
 from app.routes.tickets import router as tickets_router
+from app.routes.evaluation import router as evaluation_router
+ 
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,7 +36,7 @@ app.include_router(rag_router)
 app.include_router(sync_router)
 app.include_router(chat_router)
 app.include_router(tickets_router)
-
+app.include_router(evaluation_router)
 
 @app.on_event("startup")
 def startup():

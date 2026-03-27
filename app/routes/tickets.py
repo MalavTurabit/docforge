@@ -80,7 +80,6 @@ def create_ticket_endpoint(req: TicketCreateRequest):
         result = create_ticket.invoke({
             "question":           req.question,
             "industry":           req.industry or "",
-            "doc_type":           req.doc_type or "",
             "retrieved_attempts": req.retrieved_attempts or 0,
             "session_summary":    req.session_summary or "",
         })
@@ -129,6 +128,9 @@ def update_ticket(ticket_id: str, req: TicketUpdateRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ticket update failed: {str(e)}")
+
+
+@router.get("", response_model=list[TicketOut])
 def get_tickets(status: Optional[str] = None):
     """
     Fetch all tickets from the CiteRAG Tickets Notion DB.

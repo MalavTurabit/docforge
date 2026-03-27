@@ -41,7 +41,8 @@ DEFAULTS = {
     "rag_session_id":        None,
     "rag_pending_tickets":    [],
     "rag_awaiting_selection": False,
-    "rag_last_created_ticket": None,  # {ticket_id, notion_url, priority} — for updates
+    "rag_last_created_ticket": None,
+    "rag_current_chat_id":    None,  # ID of currently open chat in history
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
@@ -95,8 +96,22 @@ def _save_current_chat():
     if title == "New Chat":
         first_q = next((m["content"] for m in msgs if m["role"] == "user"), "Chat")
         title = first_q[:46] + ("…" if len(first_q) > 46 else "")
+
+    # Update existing entry if already saved
+    chat_id = st.session_state.get("rag_current_chat_id")
+    if chat_id:
+        for i, item in enumerate(st.session_state.rag_history):
+            if item.get("id") == chat_id:
+                st.session_state.rag_history[i]["messages"] = msgs.copy()
+                st.session_state.rag_history[i]["chunks"]   = st.session_state.rag_last_chunks.copy()
+                st.session_state.rag_history[i]["title"]    = title
+                return
+
+    # New entry
+    new_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
+    st.session_state.rag_current_chat_id = new_id
     st.session_state.rag_history.insert(0, {
-        "id":         datetime.now().strftime("%Y%m%d%H%M%S%f"),
+        "id":         new_id,
         "title":      title,
         "messages":   msgs.copy(),
         "chunks":     st.session_state.rag_last_chunks.copy(),
@@ -283,6 +298,7 @@ def render_sidebar():
             st.session_state.rag_pending_tickets    = []
             st.session_state.rag_awaiting_selection  = False
             st.session_state.rag_last_created_ticket = None
+            st.session_state.rag_current_chat_id     = None
             import uuid
             st.session_state.rag_session_id = str(uuid.uuid4())
             st.rerun()
@@ -462,11 +478,66 @@ def _handle_graph_response(data: dict, query: str):
     if st.session_state.rag_chat_title == "New Chat":
         st.session_state.rag_chat_title = query[:46] + ("…" if len(query) > 46 else "")
 
+    # Auto-save to history after every exchange
+    _save_current_chat()
+
 
 def page_chat():
     messages  = st.session_state.rag_messages
     inspector = st.session_state.rag_inspector_open
     dept      = st.session_state.rag_filter_dept
+
+    # ── Sticky layout + auto-scroll CSS ───────────────────────
+    st.markdown("""
+    <style>
+    /* Stick the tab bar + header to top */
+    .stTabs [data-baseweb="tab-list"] {
+        position: sticky;
+        top: 0;
+        z-index: 100;
+        background: var(--background-color);
+        padding-top: 0.5rem;
+    }
+
+    /* Stick chat input to bottom */
+    .stChatInput {
+        position: fixed !important;
+        bottom: 0 !important;
+        left: 0 !important;
+        right: 0 !important;
+        z-index: 999 !important;
+        background: var(--background-color) !important;
+        padding: 0.75rem 1.5rem 1rem 1.5rem !important;
+        border-top: 1px solid rgba(128,128,128,0.2) !important;
+        margin-left: 245px !important;
+    }
+
+    /* Add bottom padding so last message isn't hidden behind input */
+    .main .block-container {
+        padding-bottom: 6rem !important;
+    }
+
+    /* Spinner above chat bar */
+    .stSpinner {
+        position: fixed !important;
+        bottom: 5rem !important;
+        left: 50% !important;
+        transform: translateX(-50%) !important;
+        z-index: 1000 !important;
+        background: var(--background-color) !important;
+        padding: 0.5rem 1rem !important;
+        border-radius: 8px !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15) !important;
+    }
+    </style>
+
+    <!-- Auto-scroll to bottom using anchor — works inside Streamlit iframe -->
+    <div id="chat-bottom-anchor"></div>
+    <script>
+        const anchor = document.getElementById('chat-bottom-anchor');
+        if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    </script>
+    """, unsafe_allow_html=True)
 
     # ── Chat title bar ─────────────────────────────────────────
     t_col, e_col = st.columns([8, 1], gap="small")
@@ -585,6 +656,18 @@ def page_chat():
                                 else:
                                     _handle_graph_response(data, msg["content"])
                                 st.rerun()
+
+    # ── Scroll anchor — auto-scrolls to bottom after new messages ──
+    with chat_col:
+        st.markdown('<div id="chat-end"></div>', unsafe_allow_html=True)
+        st.markdown("""
+        <script>
+            setTimeout(function() {
+                const el = document.getElementById('chat-end');
+                if (el) el.scrollIntoView({behavior: 'smooth'});
+            }, 200);
+        </script>
+        """, unsafe_allow_html=True)
 
     # ── Inspector panel ────────────────────────────────────────
     if insp_col:
@@ -933,47 +1016,192 @@ def page_tickets():
 # ── Tab 4: Evaluation Lab ──────────────────────────────────────
 def page_evaluation_lab():
     st.subheader("📊 Evaluation Lab")
-    st.caption("Run RAGAS evaluation on any query to assess retrieval quality.")
+    st.caption("Add 5–20 question + ground truth pairs and run RAGAS evaluation across all of them.")
 
-    # Manual eval form
-    with st.form("eval_form"):
-        eval_query = st.text_input(
-            "Query to evaluate",
-            value=st.session_state.rag_eval_query,
-            placeholder="e.g. What is the leave policy for employees?",
+    # ── Session state for eval pairs and results ───────────────
+    if "eval_pairs" not in st.session_state:
+        st.session_state.eval_pairs = []
+    if "eval_results" not in st.session_state:
+        st.session_state.eval_results = []
+
+    pairs   = st.session_state.eval_pairs
+    MAX_PAIRS = 20
+    MIN_PAIRS = 5
+
+    # ── Input section ──────────────────────────────────────────
+    st.markdown("#### ➕ Add Evaluation Pairs")
+
+    input_tab1, input_tab2 = st.tabs(["Add one by one", "Paste as CSV"])
+
+    with input_tab1:
+        with st.form("add_pair_form", clear_on_submit=True):
+            q  = st.text_input("Question", placeholder="e.g. What is the leave policy?")
+            gt = st.text_area("Ground Truth Answer", height=80,
+                              placeholder="e.g. Employees get 20 days annual leave...")
+            col_add, col_info = st.columns([2, 3])
+            with col_add:
+                add_clicked = st.form_submit_button(
+                    "Add Pair", type="primary", use_container_width=True,
+                    disabled=len(pairs) >= MAX_PAIRS,
+                )
+            with col_info:
+                st.caption(f"{len(pairs)}/{MAX_PAIRS} pairs added")
+
+        if add_clicked:
+            if not q.strip() or not gt.strip():
+                st.warning("Both question and ground truth are required.")
+            elif len(pairs) >= MAX_PAIRS:
+                st.warning(f"Maximum {MAX_PAIRS} pairs allowed.")
+            elif any(p["question"].strip().lower() == q.strip().lower() for p in pairs):
+                st.warning("This question is already in the list.")
+            else:
+                st.session_state.eval_pairs.append({
+                    "question":     q.strip(),
+                    "ground_truth": gt.strip(),
+                })
+                st.rerun()
+
+    with input_tab2:
+        st.caption("Format: one pair per line — `question | ground truth`")
+        csv_input = st.text_area(
+            "Paste pairs",
+            height=150,
+            placeholder="What is the leave policy? | Employees get 20 days annual leave per year.\nWhat is the notice period? | Standard notice period is 30 calendar days.",
+            label_visibility="collapsed",
         )
-        col_ind, col_doc = st.columns(2)
-        with col_ind:
-            industries  = fetch_industries()
-            ind_options = ["All"] + industries
-            eval_industry = st.selectbox("Industry filter", ind_options, key="eval_industry")
-        with col_doc:
-            eval_doc_type = st.text_input("Doc type filter (optional)", key="eval_doc_type")
+        if st.button("Import Pairs", use_container_width=True):
+            added = 0
+            errors = []
+            for i, line in enumerate(csv_input.strip().split("\n"), 1):
+                if "|" not in line:
+                    errors.append(f"Line {i}: missing '|' separator")
+                    continue
+                parts = line.split("|", 1)
+                q_csv  = parts[0].strip()
+                gt_csv = parts[1].strip()
+                if not q_csv or not gt_csv:
+                    errors.append(f"Line {i}: empty question or ground truth")
+                    continue
+                if len(pairs) + added >= MAX_PAIRS:
+                    errors.append(f"Line {i}: max {MAX_PAIRS} pairs reached")
+                    break
+                if any(p["question"].lower() == q_csv.lower() for p in pairs):
+                    errors.append(f"Line {i}: duplicate question skipped")
+                    continue
+                st.session_state.eval_pairs.append({
+                    "question":     q_csv,
+                    "ground_truth": gt_csv,
+                })
+                added += 1
+            if added:
+                st.success(f"Added {added} pairs.")
+            if errors:
+                for e in errors:
+                    st.warning(e)
+            if added:
+                st.rerun()
 
-        submitted = st.form_submit_button("▶ Run Evaluation", type="primary", use_container_width=True)
-
-    if submitted and eval_query.strip():
-        st.session_state.rag_eval_query = eval_query
-        with st.spinner("Running RAGAS evaluation — this takes ~30 seconds…"):
-            data, err = api("post", "/chat", json={
-                "query":    eval_query,
-                "industry": None if eval_industry == "All" else eval_industry,
-                "doc_type": eval_doc_type or "",
-                "run_eval": True,
-            })
-        if err:
-            st.error(f"Evaluation failed: {err}")
-        else:
-            st.session_state.rag_eval_scores = data.get("ragas_scores")
-            st.session_state.rag_last_chunks = data.get("chunks", [])
-            st.success("✓ Evaluation complete")
-
-    # Show scores
-    scores = st.session_state.rag_eval_scores
-    if scores:
+    # ── Current pairs table ────────────────────────────────────
+    if pairs:
         st.divider()
-        st.markdown("#### 📊 RAGAS Scores")
+        st.markdown(f"#### 📋 Evaluation Set ({len(pairs)} pairs)")
 
+        for i, pair in enumerate(pairs):
+            col_q, col_gt, col_del = st.columns([3, 4, 1])
+            with col_q:
+                st.caption(f"**Q{i+1}:** {pair['question'][:80]}{'…' if len(pair['question']) > 80 else ''}")
+            with col_gt:
+                st.caption(f"**GT:** {pair['ground_truth'][:80]}{'…' if len(pair['ground_truth']) > 80 else ''}")
+            with col_del:
+                if st.button("🗑", key=f"del_pair_{i}", help="Remove"):
+                    st.session_state.eval_pairs.pop(i)
+                    st.session_state.eval_results = []
+                    st.rerun()
+
+        if st.button("🗑 Clear All", use_container_width=False):
+            st.session_state.eval_pairs = []
+            st.session_state.eval_results = []
+            st.rerun()
+
+    # ── Run evaluation ─────────────────────────────────────────
+    st.divider()
+    can_run = len(pairs) >= MIN_PAIRS
+
+    if not can_run:
+        st.info(f"Add at least {MIN_PAIRS} pairs to run evaluation. ({len(pairs)}/{MIN_PAIRS} added)")
+
+    dept = st.session_state.rag_filter_dept
+
+    if st.button(
+        f"▶ Run Evaluation ({len(pairs)} pairs)",
+        type="primary",
+        use_container_width=True,
+        disabled=not can_run,
+    ):
+        st.session_state.eval_results = []
+        results = []
+
+        progress_bar  = st.progress(0, text="Starting evaluation…")
+        results_placeholder = st.empty()
+
+        for i, pair in enumerate(pairs):
+            progress_bar.progress(
+                (i) / len(pairs),
+                text=f"Evaluating {i+1}/{len(pairs)}: {pair['question'][:50]}…"
+            )
+
+            try:
+                data, err = api("post", "/chat", json={
+                    "query":    pair["question"],
+                    "industry": None if dept == "All" else dept,
+                    "run_eval": True,
+                    "session_id": "",
+                })
+
+                if err or not data:
+                    results.append({
+                        "question":     pair["question"],
+                        "ground_truth": pair["ground_truth"],
+                        "answer":       f"Error: {err}",
+                        "scores":       None,
+                        "status":       "error",
+                    })
+                else:
+                    scores = data.get("ragas_scores") or {}
+                    results.append({
+                        "question":     pair["question"],
+                        "ground_truth": pair["ground_truth"],
+                        "answer":       data.get("answer", ""),
+                        "scores":       scores,
+                        "status":       "ok",
+                    })
+            except Exception as e:
+                results.append({
+                    "question":     pair["question"],
+                    "ground_truth": pair["ground_truth"],
+                    "answer":       f"Exception: {str(e)}",
+                    "scores":       None,
+                    "status":       "error",
+                })
+
+        progress_bar.progress(1.0, text=f"✓ Evaluation complete — {len(pairs)} pairs")
+        st.session_state.eval_results = results
+        st.rerun()
+
+    # ── Show results ───────────────────────────────────────────
+    results = st.session_state.eval_results
+    if results:
+        st.divider()
+
+        # Aggregate scores
+        metric_keys = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
+        agg = {}
+        for key in metric_keys:
+            vals = [r["scores"].get(key) for r in results
+                    if r.get("scores") and r["scores"].get(key) is not None]
+            agg[key] = round(sum(vals) / len(vals), 3) if vals else None
+
+        st.markdown("#### 📊 Aggregate RAGAS Scores")
         c1, c2, c3, c4 = st.columns(4)
         for col, name, key in [
             (c1, "Faithfulness",      "faithfulness"),
@@ -981,28 +1209,80 @@ def page_evaluation_lab():
             (c3, "Context Precision", "context_precision"),
             (c4, "Context Recall",    "context_recall"),
         ]:
-            val = scores.get(key)
+            val = agg.get(key)
             with col:
                 if val is not None:
                     emoji = "🟢" if val >= 0.8 else ("🟡" if val >= 0.6 else "🔴")
-                    st.metric(label=f"{emoji} {name}", value=f"{val:.2f}")
+                    st.metric(label=f"{emoji} {name}", value=f"{val:.3f}")
                 else:
                     st.metric(label=f"⚪ {name}", value="N/A")
 
+        # Per-question breakdown
         st.divider()
-        st.markdown("#### 📄 Retrieved Chunks Used")
-        chunks = st.session_state.rag_last_chunks
-        if chunks:
-            for i, c in enumerate(chunks, 1):
-                doc_t = c.get("doc_title", "")
-                sec   = c.get("section_heading", "")
-                score = c.get("score", 0.0)
-                text  = c.get("raw_text", "")
-                meta  = f"{doc_t} → {sec}" if sec else doc_t
-                with st.expander(f"#{i} · {meta}  —  {score:.4f}"):
-                    st.caption(text[:400] + ("…" if len(text) > 400 else ""))
-        else:
-            st.info("No chunks retrieved for this query.")
+        st.markdown(f"#### 📋 Per-Question Results ({len(results)} pairs)")
+
+        for i, r in enumerate(results):
+            scores  = r.get("scores") or {}
+            status  = r.get("status", "ok")
+            f_val   = scores.get("faithfulness")
+            ar_val  = scores.get("answer_relevancy")
+            cp_val  = scores.get("context_precision")
+            cr_val  = scores.get("context_recall")
+
+            def _fmt(v):
+                if v is None: return "⚪ N/A"
+                e = "🟢" if v >= 0.8 else ("🟡" if v >= 0.6 else "🔴")
+                return f"{e} {v:.2f}"
+
+            label = (
+                f"**Q{i+1}** — {r['question'][:60]}{'…' if len(r['question']) > 60 else ''}  "
+                f"| F:{_fmt(f_val)} AR:{_fmt(ar_val)} CP:{_fmt(cp_val)} CR:{_fmt(cr_val)}"
+            )
+
+            with st.expander(label, expanded=False):
+                st.markdown(f"**Question:** {r['question']}")
+                st.markdown(f"**Ground Truth:** {r['ground_truth']}")
+                st.markdown(f"**Generated Answer:** {r['answer'][:500]}{'…' if len(r['answer']) > 500 else ''}")
+                if status == "error":
+                    st.error("Evaluation failed for this pair.")
+
+        # ── Print Report button ────────────────────────────────
+        st.divider()
+        if st.button("🖨 Download PDF Report", use_container_width=True, type="secondary"):
+            from datetime import datetime
+            payload = {
+                "results": [
+                    {
+                        "question":     r["question"],
+                        "ground_truth": r["ground_truth"],
+                        "answer":       r.get("answer", ""),
+                        "scores":       r.get("scores"),
+                        "status":       r.get("status", "ok"),
+                    }
+                    for r in results
+                ],
+                "generated_at": datetime.now().strftime("%B %d, %Y at %H:%M"),
+            }
+            with st.spinner("Generating PDF report…"):
+                try:
+                    import requests as _req
+                    resp = _req.post(
+                        f"{API_BASE}/evaluation/report",
+                        json=payload,
+                        timeout=60,
+                    )
+                    if resp.status_code == 200:
+                        st.download_button(
+                            label      = "📥 Click to download report",
+                            data       = resp.content,
+                            file_name  = f"citerag_eval_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                            mime       = "application/pdf",
+                            use_container_width=True,
+                        )
+                    else:
+                        st.error(f"Report generation failed: {resp.status_code}")
+                except Exception as e:
+                    st.error(f"Failed to generate report: {e}")
 
 
 # ── Main ───────────────────────────────────────────────────────
