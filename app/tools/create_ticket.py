@@ -110,7 +110,7 @@ def _find_existing_ticket(question: str) -> tuple[str | None, str | None, str | 
             if e["question"].lower() == question.lower():
                 return e["id"], e["question"], e["notion_url"]
 
-        # Step 2 — semantic match via LLM
+        # Step 2 — semantic match via LLM — only match if VERY similar topic
         try:
             llm = AzureChatOpenAI(
                 azure_endpoint   = os.getenv("AZURE_LLM_ENDPOINT", ""),
@@ -125,10 +125,12 @@ def _find_existing_ticket(question: str) -> tuple[str | None, str | None, str | 
             prompt = (
                 f"New question: \"{question}\"\n\n"
                 f"Existing tickets:\n{existing_list}\n\n"
-                f"Does any existing ticket cover the SAME topic or issue as the new question? "
-                f"Consider questions about the same policy, rule, or topic as duplicates "
-                f"even if worded differently.\n\n"
-                f"Reply with just the NUMBER of the matching ticket, or 0 if none match."
+                f"Does any existing ticket cover the EXACT SAME specific question as the new one?\n"
+                f"Be STRICT — only match if they are asking about the identical topic with the same intent.\n"
+                f"Do NOT match if they are about the same general subject but asking different things.\n"
+                f"Examples of matches: 'what is overtime pay?' vs 'how much is overtime compensation?'\n"
+                f"Examples of non-matches: 'who is Rohit Mehra?' vs 'what job title was offered to him?'\n\n"
+                f"Reply with just the NUMBER of the matching ticket, or 0 if none match closely enough."
             )
             response = llm.invoke(prompt)
             num = response.content.strip()
@@ -244,8 +246,9 @@ def create_ticket(
     logger.info(f"[create_ticket] Created {ticket_id} → {page_id} | Priority: {priority}")
 
     return {
-        "ticket_id":  page_id,
-        "status":     "created",
-        "priority":   priority,
-        "notion_url": notion_url,
+        "ticket_id":    page_id,
+        "ticket_title": ticket_id,   # TKT-XXXXXXXX — human readable
+        "status":       "created",
+        "priority":     priority,
+        "notion_url":   notion_url,
     }

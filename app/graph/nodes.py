@@ -132,22 +132,29 @@ def retrieval_node(state: CiteRAGState) -> CiteRAGState:
                 "retrieved_attempts": 1,
             }
 
-        # ── Refine query with memory context for single / multi_step ─────────
+        # ── Refine query with memory context ─────────────────────────────────
         chat_history = state.get("chat_history", [])
+
         if chat_history:
             recent = [
                 m for m in chat_history[-4:]
                 if m.get("role") in ("user", "assistant") and m.get("content", "").strip()
             ]
             if recent:
-                history_context = "\n".join(
-                    f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content'][:150]}"
+                # Only use user messages for context — strip assistant responses
+                # to avoid citation artifacts ([1], [2]) polluting the refined query
+                user_context = "\n".join(
+                    f"User: {m['content'][:120]}"
                     for m in recent
+                    if m.get("role") == "user"
                 )
-                context_aware_query = (
-                    f"Conversation so far:\n{history_context}\n\n"
-                    f"New question: {query}"
-                )
+                if user_context:
+                    context_aware_query = (
+                        f"Previous user questions:\n{user_context}\n\n"
+                        f"New question: {query}"
+                    )
+                else:
+                    context_aware_query = query
             else:
                 context_aware_query = query
         else:
@@ -158,6 +165,13 @@ def retrieval_node(state: CiteRAGState) -> CiteRAGState:
         # Ensure we get a clean single-line query back
         if "\n" in refined:
             refined = refined.strip().split("\n")[-1].strip()
+        if not refined or len(refined) < 5:
+            refined = query
+
+        # Strip any citation artifacts like [1], [2] that crept in from chat history
+        import re
+        refined = re.sub(r'\s*according to documents?\s*(\[\d+\][,\s]*)+', '', refined, flags=re.IGNORECASE).strip()
+        refined = re.sub(r'\[\d+\]', '', refined).strip()
         if not refined or len(refined) < 5:
             refined = query
 
@@ -177,12 +191,34 @@ def retrieval_node(state: CiteRAGState) -> CiteRAGState:
             }
 
         # ── Single retrieval path (default) ───────────────────────────────────
-        chunks = search_docs.invoke({
-            "query":    refined,
-            "industry": state.get("industry", ""),
-            "doc_type": state.get("doc_type", ""),
-        })
-        logger.info(f"[retrieval_node] single_retrieval → {len(chunks)} chunks")
+        # Use multi-query for complex questions (multiple aspects, long, contains 'and')
+        is_complex = (
+            " and " in query.lower() or
+            " also " in query.lower() or
+            query.count("?") > 1 or
+            len(query.split()) > 8
+        )
+
+        if is_complex:
+            from app.services.rag_service import retrieve_chunks_multi_query
+            industry_filter = state.get("industry") or None
+            doc_type_filter = state.get("doc_type") or None
+            if industry_filter == "All": industry_filter = None
+            if doc_type_filter == "All": doc_type_filter = None
+            chunks = retrieve_chunks_multi_query(
+                query    = refined,
+                top_k    = 7,   # extra chunks for multi-query merging
+                industry = industry_filter,
+                doc_type = doc_type_filter,
+            )
+            logger.info(f"[retrieval_node] multi-query single_retrieval → {len(chunks)} chunks")
+        else:
+            chunks = search_docs.invoke({
+                "query":    refined,
+                "industry": state.get("industry", ""),
+                "doc_type": state.get("doc_type", ""),
+            })
+            logger.info(f"[retrieval_node] single_retrieval → {len(chunks)} chunks")
         return {
             **state,
             "refined_query":      refined,
@@ -263,13 +299,13 @@ def evidence_check_node(state: CiteRAGState) -> CiteRAGState:
 
     # Condition 2 — run judge on a quick preview answer
     try:
-        # Generate a lightweight preview answer for judging
-        # (full answer generated in answer_node — this is just for grounding check)
+        # Generate preview answer WITHOUT chat history to avoid contamination
+        # from previous wrong answers in memory
         from app.services.rag_service import generate_answer as _generate_answer
         preview_answer = _generate_answer(
             query        = state.get("refined_query", state["query"]),
             chunks       = chunks,
-            chat_history = state.get("chat_history", []),
+            chat_history = None,  # no history — pure chunk-based answer
         )
 
         verdict = judge_answer(
@@ -489,11 +525,12 @@ def ticket_node(state: CiteRAGState) -> CiteRAGState:
             })
 
             ticket_id     = result.get("ticket_id")
+            ticket_title  = result.get("ticket_title", ticket_id)
             ticket_status = result.get("status")
             priority      = result.get("priority")
             notion_url    = result.get("notion_url", "")
 
-            logger.info(f"[ticket_node] ticket={ticket_id} status={ticket_status} priority={priority}")
+            logger.info(f"[ticket_node] ticket={ticket_id} title={ticket_title} status={ticket_status} priority={priority}")
 
             if ticket_status == "exists":
                 matched = result.get("matched_question", "")
@@ -518,7 +555,8 @@ def ticket_node(state: CiteRAGState) -> CiteRAGState:
             else:
                 answer = (
                     f"✅ Support ticket created successfully!\n\n"
-                    f"**Ticket ID:** `{ticket_id}`\n"
+                    f"**Ticket:** `{ticket_title}`\n"
+                    f"**Question:** {ticket_question[:120]}\n"
                     f"**Priority:** {priority}\n\n"
                     + (f"[View ticket in Notion ↗]({notion_url})\n\n" if notion_url else "")
                     + "Our team will review it and get back to you."
@@ -530,6 +568,7 @@ def ticket_node(state: CiteRAGState) -> CiteRAGState:
                 "sources":       [],
                 "ragas_scores":  None,
                 "ticket_id":     ticket_id,
+                "ticket_title":  ticket_title,
                 "ticket_status": ticket_status,
                 "session_summary": clean_summary,
                 "error":         None,
@@ -547,32 +586,37 @@ def ticket_node(state: CiteRAGState) -> CiteRAGState:
     # ── Mode 1: Ask for confirmation — check for semantic duplicate first ────────
     logger.info("[ticket_node] No answer found — checking for semantic duplicate before asking")
 
-    # Run semantic duplicate check BEFORE asking user for confirmation
-    # This prevents asking for confirmation when a similar ticket already exists
-    try:
-        from app.tools.create_ticket import _find_existing_ticket
-        existing_id, matched_q, existing_url = _find_existing_ticket(state["query"])
-        if existing_id:
-            notion_url = existing_url or f"https://notion.so/{existing_id.replace('-', '')}"
-            logger.info(f"[ticket_node] Semantic duplicate found: '{matched_q[:60] if matched_q else ''}'")
-            answer = (
-                "I wasn't able to find this information in the available documents.\n\n"
-                "However, a support ticket already exists for this topic"
-                + (f" — matched to: *\"{matched_q[:80]}\"*" if matched_q and matched_q.lower() != state["query"].lower() else "")
-                + " — our team will follow up with you shortly.\n\n"
-                + (f"[View existing ticket in Notion ↗]({notion_url})" if notion_url else "")
-            )
-            return {
-                **state,
-                "answer":        answer,
-                "sources":       [],      # never show sources for duplicate tickets
-                "chunks":        [],      # clear chunks so UI doesn't render them
-                "ragas_scores":  None,
-                "ticket_id":     existing_id,
-                "ticket_status": "exists",
-            }
-    except Exception as e:
-        logger.warning(f"[ticket_node] Pre-check duplicate failed: {e} — proceeding with confirmation")
+    query_text  = state["query"]
+    # Skip duplicate check for specific/detailed queries — less likely to be true duplicates
+    is_specific = len(query_text.split()) > 6 or any(
+        word[0].isupper() for word in query_text.split() if len(word) > 3
+    )
+
+    if not is_specific:
+        try:
+            from app.tools.create_ticket import _find_existing_ticket
+            existing_id, matched_q, existing_url = _find_existing_ticket(query_text)
+            if existing_id:
+                notion_url = existing_url or f"https://notion.so/{existing_id.replace('-', '')}"
+                logger.info(f"[ticket_node] Semantic duplicate found: '{matched_q[:60] if matched_q else ''}'")
+                answer = (
+                    "I wasn't able to find this information in the available documents.\n\n"
+                    "However, a support ticket already exists for this topic"
+                    + (f" — matched to: *\"{matched_q[:80]}\"*" if matched_q and matched_q.lower() != query_text.lower() else "")
+                    + " — our team will follow up with you shortly.\n\n"
+                    + (f"[View existing ticket in Notion ↗]({notion_url})" if notion_url else "")
+                )
+                return {
+                    **state,
+                    "answer":        answer,
+                    "sources":       [],
+                    "chunks":        [],
+                    "ragas_scores":  None,
+                    "ticket_id":     existing_id,
+                    "ticket_status": "exists",
+                }
+        except Exception as e:
+            logger.warning(f"[ticket_node] Pre-check duplicate failed: {e} — proceeding with confirmation")
 
     answer = (
         "I wasn't able to find this information in the available documents.\n\n"

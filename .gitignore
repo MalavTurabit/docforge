@@ -13,3 +13,5 @@ wheels/
 
 milvus.db
 .milvus.db.lock
+
+patch_pymilvus.py

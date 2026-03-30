@@ -55,8 +55,10 @@ class ChatResponse(BaseModel):
     grounded:         bool
     path:             str
     can_answer:       bool
+    refined_query:    Optional[str]  = None
     ragas_scores:     Optional[dict] = None
     ticket_id:        Optional[str]  = None
+    ticket_title:     Optional[str]  = None
     ticket_status:    Optional[str]  = None
     no_answer_reason: Optional[str]  = None
     error:            Optional[str]  = None
@@ -126,8 +128,10 @@ def chat(req: ChatRequest):
         grounded         = result.get("grounded", True),
         path             = result.get("path", ""),
         can_answer       = result.get("can_answer", True),
+        refined_query    = result.get("refined_query", ""),
         ragas_scores     = result.get("ragas_scores"),
         ticket_id        = result.get("ticket_id"),
+        ticket_title     = result.get("ticket_title"),
         ticket_status    = result.get("ticket_status"),
         no_answer_reason = result.get("no_answer_reason"),
         error            = result.get("error"),

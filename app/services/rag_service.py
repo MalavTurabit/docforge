@@ -167,10 +167,13 @@ Rules:
 - Keep it as a single sentence question
 - Do NOT add information not implied by the original query
 - Do NOT change the intent of the query
+- NEVER include citation references like [1], [2], [3] in the output
+- NEVER add phrases like "according to documents" or "as mentioned in"
+- Output ONLY the clean search query — nothing else
 
 Original query: "{query}"
 
-Respond with ONLY the rewritten query — no explanation, no quotes."""
+Respond with ONLY the rewritten query — no explanation, no quotes, no citations."""
 
     refined = _chat(
         [{"role": "user", "content": prompt}],
@@ -231,8 +234,9 @@ Respond with ONLY the extracted question — no explanation, no quotes."""
 
 # ── MMR config ────────────────────────────────────────────────────────────────
 
-MMR_FETCH_K = 20
-MMR_LAMBDA  = 0.6
+MMR_FETCH_K = 30    # increased from 20 — more candidates before MMR
+MMR_LAMBDA  = 0.75  # increased from 0.6 — more relevance, less diversity penalty
+                    # prevents penalising two chunks from the same relevant doc
 
 
 def _cosine_similarity(v1: list[float], v2: list[float]) -> float:
@@ -288,6 +292,152 @@ def mmr_rerank(
         result.append(c)
 
     return result
+
+
+def generate_sub_queries(query: str) -> list[str]:
+    """
+    For complex queries, generate 2-3 focused sub-queries that together
+    cover all aspects of the original question.
+    """
+    prompt = f"""You are a search query decomposer for a document retrieval system.
+
+Break the following question into 2-3 keyword-dense search queries for vector search.
+Each sub-query must target a DIFFERENT aspect. Make them short, specific, keyword-rich.
+
+Original question: "{query}"
+
+Rules:
+- Each sub-query should be 4-8 keywords, NO full sentences
+- If asking about a person AND their role/position: one query for the person details, one for the job title/position
+- Use domain keywords: "job title", "position", "role", "offer letter", "employment contract", "candidate"
+- Do NOT use full sentences or question format
+- Do NOT repeat the same keywords across sub-queries
+- Respond with ONLY the queries, one per line, no numbering
+
+Examples:
+Original: "who is John Smith and what role was offered?"
+Output:
+John Smith candidate personal details address
+job title position offered employment offer letter John Smith
+
+Original: "who signed the offer letter and what is the candidate address?"
+Output:
+signature block HR signatory name title offer letter
+candidate address personal details offer letter
+
+Original: "what is the leave policy and how to apply?"
+Output:
+leave policy annual sick casual entitlement days
+leave application process HRMS portal submission"""
+
+    try:
+        raw = _chat(
+            [{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=100,
+        ).strip()
+        queries = [q.strip() for q in raw.split("\n") if q.strip() and len(q.strip()) > 5]
+        if not queries:
+            return [query]
+        # Always include original as fallback
+        if query not in queries:
+            queries.append(query)
+        logger.info(f"[sub_queries] '{query[:50]}' → {queries}")
+        return queries[:3]
+    except Exception as e:
+        logger.warning(f"[sub_queries] Failed: {e} — using original query")
+        return [query]
+
+
+def retrieve_chunks_no_mmr(
+    query: str,
+    top_k: int = TOP_K,
+    industry: str | None = None,
+    doc_type: str | None = None,
+) -> list[dict]:
+    """
+    Pure cosine similarity retrieval — no MMR reranking.
+    Used by multi-query retrieval where diversity comes from sub-queries,
+    not from MMR within a single query.
+    """
+    cached = get_retrieval_cache(query + "__no_mmr", industry, doc_type)
+    if cached is not None:
+        return cached
+
+    query_vector = embed_texts([query])[0]
+    client       = get_client()
+
+    filters = []
+    if industry and industry != "All":
+        filters.append(f'industry == "{industry}"')
+    if doc_type and doc_type != "All":
+        filters.append(f'doc_type == "{doc_type}"')
+    filter_expr = " && ".join(filters) if filters else ""
+
+    search_params = {
+        "collection_name": COLLECTION_NAME,
+        "data":            [query_vector],
+        "limit":           top_k,
+        "output_fields":   ["chunk_id", "page_id", "doc_title", "section_heading",
+                            "doc_type", "industry", "version", "chunk_index", "raw_text"],
+        "search_params":   {"metric_type": "COSINE"},
+        "anns_field":      "embedding",
+    }
+    if filter_expr:
+        search_params["filter"] = filter_expr
+
+    results    = client.search(**search_params)
+    chunks = []
+    for hit in results[0]:
+        e = hit.get("entity", {})
+        chunks.append({
+            "chunk_id":        e.get("chunk_id"),
+            "page_id":         e.get("page_id"),
+            "doc_title":       e.get("doc_title"),
+            "section_heading": e.get("section_heading"),
+            "doc_type":        e.get("doc_type"),
+            "industry":        e.get("industry"),
+            "raw_text":        e.get("raw_text"),
+            "score":           round(float(hit.get("distance", 0)), 4),
+        })
+
+    set_retrieval_cache(query + "__no_mmr", industry, doc_type, chunks)
+    return chunks
+
+
+def retrieve_chunks_multi_query(
+    query: str,
+    top_k: int = TOP_K,
+    industry: str | None = None,
+    doc_type: str | None = None,
+) -> list[dict]:
+    """
+    Multi-query retrieval using pure cosine similarity (no MMR).
+    Generates sub-queries, retrieves for each, merges and deduplicates,
+    returns top_k by score.
+    MMR is skipped here because diversity comes from different sub-queries.
+    """
+    sub_queries = generate_sub_queries(query)
+
+    seen  = {}   # chunk_id → chunk (keep highest score)
+    freq  = {}   # chunk_id → how many sub-queries returned it
+
+    for sq in sub_queries:
+        chunks = retrieve_chunks_no_mmr(sq, top_k=top_k * 2, industry=industry, doc_type=doc_type)
+        for c in chunks:
+            cid = c.get("chunk_id")
+            freq[cid] = freq.get(cid, 0) + 1
+            if cid not in seen or c["score"] > seen[cid]["score"]:
+                seen[cid] = c
+
+    # Boost score for chunks appearing in multiple sub-queries
+    for cid, chunk in seen.items():
+        if freq.get(cid, 1) > 1:
+            chunk["score"] = round(chunk["score"] * (1 + 0.15 * (freq[cid] - 1)), 4)
+
+    merged = sorted(seen.values(), key=lambda x: x["score"], reverse=True)
+    logger.info(f"[multi_query] {len(sub_queries)} sub-queries → {len(merged)} unique chunks → returning top {top_k}")
+    return merged[:top_k]
 
 
 def retrieve_chunks(
@@ -443,15 +593,26 @@ def generate_answer(
     messages = [{"role": "system", "content": CITERAG_SYSTEM}]
 
     if chat_history:
-        for msg in chat_history[-6:]:
+        for msg in chat_history[-8:]:
             role    = msg.get("role", "user")
             content = msg.get("content", "")
-            if role in ("user", "assistant") and content.strip():
+            if role in ("user", "assistant", "system") and content.strip():
                 messages.append({"role": role, "content": content})
+
+    # Extract first_message from system context if present — inject prominently
+    first_msg_note = ""
+    if chat_history:
+        sys_msg = next((m["content"] for m in chat_history if m.get("role") == "system"), "")
+        if "very first message" in sys_msg:
+            import re
+            match = re.search(r'very first message.*?was: "(.+?)"', sys_msg)
+            if match:
+                first_msg_note = f"\n\nNote: The user's very first message in this conversation was: \"{match.group(1)}\""
 
     messages.append({"role": "user", "content": (
         f"Document excerpts:\n{context}\n\n"
-        f"Question: {query}\n\n"
+        f"Question: {query}"
+        f"{first_msg_note}\n\n"
         f"Answer (with inline citations):"
     )})
 
@@ -528,40 +689,37 @@ Provide:
 def judge_answer(query: str, answer: str, chunks: list[dict]) -> dict:
     """
     Self-RAG grounding check. Returns {"grounded": bool, "reason": str}
-
-    Grounded = every factual claim in the answer has direct explicit support
-    in at least one of the provided document excerpts.
     """
-    # Fast path — not-found answers are always correctly grounded
     if "I could not find this information" in answer:
         return {"grounded": True, "reason": "Correct not-found response"}
 
     context = _build_context(chunks)
 
-    prompt = f"""You are a strict fact-checker for a document Q&A system.
-Your job: check if every factual claim in the answer is directly supported by
-at least one of the provided document excerpts.
+    prompt = f"""You are a fact-checker for a document Q&A system.
+Check if the answer is grounded in the provided document excerpts.
 
 RULES:
-1. A claim is grounded if it appears explicitly in ANY of the excerpts — even if 
-   multiple excerpts have slightly different figures, BOTH are grounded.
-2. Numbers, dates, names, percentages — must appear verbatim in at least one excerpt.
-3. Fabricated facts not present in ANY excerpt = NOT grounded.
-4. Reasonable synthesis across multiple excerpts is FINE as long as each individual
-   claim has a source — do NOT penalise for combining multiple documents.
-5. If the answer says "I could not find" but the information IS clearly in the excerpts
-   = NOT grounded (wrong not-found response).
+1. Mark grounded=TRUE if every specific claim (names, numbers, dates, roles, addresses)
+   appears explicitly in at least one excerpt.
+2. It is FINE and CORRECT to combine information from multiple excerpts to form
+   a complete answer — this is expected behaviour, NOT a grounding violation.
+3. Mark grounded=FALSE ONLY if the answer contains specific facts that do NOT
+   appear in ANY of the excerpts (fabricated information).
+4. If the answer says "I could not find" but the info IS in the excerpts = FALSE.
+5. Minor wording differences are fine — look for semantic equivalence, not exact match.
+6. If most claims are grounded but one small detail is uncertain, still mark TRUE
+   and note the uncertainty in the reason.
 
 Document excerpts:
 {context}
 
-Question asked: {query}
-Answer to check: {answer}
+Question: {query}
+Answer: {answer}
 
 Respond with JSON only:
-{{"grounded": true/false, "reason": "specific explanation — name what is/is not supported"}}"""
+{{"grounded": true/false, "reason": "brief explanation"}}"""
 
-    raw = _chat([{"role": "user", "content": prompt}], temperature=0, max_tokens=200)
+    raw = _chat([{"role": "user", "content": prompt}], temperature=0, max_tokens=150)
     try:
         clean   = raw.replace("```json", "").replace("```", "").strip()
         verdict = json.loads(clean)

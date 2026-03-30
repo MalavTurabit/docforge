@@ -93,26 +93,24 @@ def create_ticket_endpoint(req: TicketCreateRequest):
 
 
 class TicketUpdateRequest(BaseModel):
-    priority: Optional[str] = None   # High, Medium, Low
-    status:   Optional[str] = None   # Open, In Progress, Resolved
+    priority: Optional[str] = None   # High, Medium, Low — only priority allowed from chat
 
 
 @router.patch("/{ticket_id}", response_model=TicketCreateResponse)
 def update_ticket(ticket_id: str, req: TicketUpdateRequest):
     """
-    Update priority and/or status of an existing ticket.
+    Update priority of an existing ticket.
+    Status can only be changed by the team in Notion — not via this endpoint.
     """
     if not NOTION_API_KEY:
         raise HTTPException(status_code=500, detail="Notion credentials not configured")
 
-    properties = {}
-    if req.priority and req.priority in ("High", "Medium", "Low"):
-        properties["Priority"] = {"select": {"name": req.priority}}
-    if req.status and req.status in ("Open", "In Progress", "Resolved"):
-        properties["Status"] = {"select": {"name": req.status}}
+    if not req.priority or req.priority not in ("High", "Medium", "Low"):
+        raise HTTPException(status_code=400, detail="Valid priority (High/Medium/Low) is required")
 
-    if not properties:
-        raise HTTPException(status_code=400, detail="No valid fields to update")
+    properties = {
+        "Priority": {"select": {"name": req.priority}}
+    }
 
     try:
         resp = http_requests.patch(

@@ -194,6 +194,7 @@ def run_graph(
         "sources":             [],
         "ragas_scores":        None,
         "ticket_id":           None,
+        "ticket_title":        None,
         "ticket_status":       None,
         "error":               None,
     }

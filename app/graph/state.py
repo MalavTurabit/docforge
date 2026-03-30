@@ -42,6 +42,7 @@ class CiteRAGState(TypedDict):
 
     # ── Ticket ────────────────────────────────────────────────────────────────
     ticket_id:           Optional[str]     # Notion page ID of created ticket
+    ticket_title:        Optional[str]     # TKT-XXXXXXXX human readable title
     ticket_status:       Optional[str]     # "created" | "exists"
 
     # ── Error ─────────────────────────────────────────────────────────────────

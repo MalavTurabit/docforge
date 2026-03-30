@@ -177,9 +177,24 @@ def _is_ticket_confirmation(text: str) -> bool:
 
 def _detect_ticket_update(text: str) -> dict | None:
     """
-    Detect if user wants to update the last created ticket.
-    Returns {priority, status} if update detected, None otherwise.
+    Detect if user wants to update the last created ticket's PRIORITY.
+    Status can only be changed by the team in Notion — never from chat.
+    Returns {priority} if update detected, None otherwise.
     """
+    text_lower = text.strip().lower()
+
+    # Fast reject — short ambiguous words that are NOT update requests
+    ambiguous = {"done", "ok", "okay", "thanks", "thank you", "got it", "noted",
+                 "yes", "no", "sure", "fine", "good", "great", "cool", "alright"}
+    if text_lower in ambiguous:
+        return None
+
+    # Must contain explicit priority-related keywords
+    priority_keywords = ["priority", "urgent", "high", "medium", "low",
+                         "update priority", "change priority", "modify priority", "set priority"]
+    if not any(kw in text_lower for kw in priority_keywords):
+        return None
+
     try:
         from openai import AzureOpenAI
         client = AzureOpenAI(
@@ -188,31 +203,25 @@ def _detect_ticket_update(text: str) -> dict | None:
             api_version    = os.getenv("AZURE_LLM_API_VERSION", "2024-02-01"),
         )
         prompt = (
-            f"Does the following message ask to update, modify, or change a ticket's "
-            f"priority or status?\n\n"
+            f"Does the following message ask to change a ticket's PRIORITY?\n\n"
             f"Message: \"{text.strip()}\"\n\n"
-            f"If yes, extract the values. Valid priorities: High, Medium, Low. "
-            f"Valid statuses: Open, In Progress, Resolved.\n\n"
+            f"Valid priorities: High, Medium, Low.\n\n"
+            f"Note: Only extract priority — ignore any status-related words.\n\n"
             f"Respond with JSON only: "
-            f"{{\"is_update\": true/false, \"priority\": \"High/Medium/Low or null\", "
-            f"\"status\": \"Open/In Progress/Resolved or null\"}}\n"
-            f"If not an update request, respond: {{\"is_update\": false, \"priority\": null, \"status\": null}}"
+            f"{{\"is_update\": true/false, \"priority\": \"High/Medium/Low or null\"}}"
         )
         resp = client.chat.completions.create(
             model       = os.getenv("AZURE_LLM_DEPLOYMENT_41_MINI"),
             messages    = [{"role": "user", "content": prompt}],
             temperature = 0,
-            max_tokens  = 60,
+            max_tokens  = 40,
         )
-        import json
-        raw = resp.choices[0].message.content.strip()
+        import json as _json
+        raw   = resp.choices[0].message.content.strip()
         clean = raw.replace("```json", "").replace("```", "").strip()
-        result = json.loads(clean)
-        if result.get("is_update"):
-            return {
-                "priority": result.get("priority"),
-                "status":   result.get("status"),
-            }
+        result = _json.loads(clean)
+        if result.get("is_update") and result.get("priority"):
+            return {"priority": result.get("priority"), "status": None}
     except Exception as e:
         logging.error(f"[update_detect] failed: {e}")
     return None
@@ -382,26 +391,28 @@ RAG_SUGGESTIONS = [
 def _render_message_sources(msg: dict):
     """Render clickable source links below an assistant message."""
     content = msg.get("content", "")
-    not_found = any(phrase in content.lower() for phrase in [
-        "could not find",
-        "not found",
-        "no relevant",
-        "i can only answer",
+    content_lower = content.lower()
+
+    # Only hide sources for FULLY unanswered responses
+    # Partial answers that found some info should still show sources
+    fully_not_found = any(phrase in content_lower for phrase in [
+        "i wasn't able to find this information in the available documents",
+        "would you like me to raise a support ticket",
+        "i can only answer questions about company documents",
         "outside company documents",
-        "wasn't able to find",
-        "would you like me to raise",
-        "support ticket created",
+        "a support ticket already exists",
+        "support ticket created successfully",
     ])
     sources_with_links = msg.get("sources_with_links", [])
     sources            = msg.get("sources", [])
-    if sources_with_links and not not_found:
+    if sources_with_links and not fully_not_found:
         parts = []
         for i, s in enumerate(sources_with_links):
             label = s["label"]
             url   = s.get("url", "")
             parts.append(f"[[{i+1}] {label}]({url})" if url else f"[{i+1}] {label}")
         st.markdown("**Sources:** " + "  ·  ".join(parts))
-    elif sources and not not_found:
+    elif sources and not fully_not_found:
         parts = [f"[{i+1}] {s}" for i, s in enumerate(sources)]
         st.markdown("**Sources:** " + "  ·  ".join(parts))
 
@@ -448,11 +459,12 @@ def _handle_graph_response(data: dict, query: str):
             "status":     ticket_status,
         }
         st.session_state.rag_last_ticket = ticket_info
-        # Store for potential update
+        # Store for potential update — include ticket_title
         st.session_state.rag_last_created_ticket = {
-            "ticket_id":  ticket_id,
-            "notion_url": f"https://notion.so/{ticket_id.replace('-','')}",
-            "priority":   data.get("priority", ""),
+            "ticket_id":    ticket_id,
+            "ticket_title": data.get("ticket_title", ticket_id),
+            "notion_url":   f"https://notion.so/{ticket_id.replace('-','')}",
+            "priority":     data.get("priority", ""),
         }
         # Remove from pending once ticket is created
         created_question = query
@@ -472,14 +484,20 @@ def _handle_graph_response(data: dict, query: str):
         "can_answer":         can_answer,
     }
     st.session_state.rag_messages.append(msg)
+
+    # Store refined query on the preceding user message
+    refined = data.get("refined_query", "")
+    if refined:
+        msgs = st.session_state.rag_messages
+        for i in range(len(msgs) - 2, -1, -1):
+            if msgs[i]["role"] == "user":
+                msgs[i]["refined_query"] = refined
+                break
     st.session_state.rag_last_chunks = chunks
     st.session_state.rag_last_scores = data.get("ragas_scores")
 
     if st.session_state.rag_chat_title == "New Chat":
         st.session_state.rag_chat_title = query[:46] + ("…" if len(query) > 46 else "")
-
-    # Auto-save to history after every exchange
-    _save_current_chat()
 
 
 def page_chat():
@@ -637,7 +655,11 @@ def page_chat():
                     with btn_cols[0]:
                         if st.button("📋 Copy", key=f"copy_{idx}",
                                      use_container_width=True):
-                            st.toast("✓ Copied!")
+                            st.session_state[f"show_copy_{idx}"] = not st.session_state.get(f"show_copy_{idx}", False)
+
+                    # Show copyable code block when copy clicked
+                    if st.session_state.get(f"show_copy_{idx}", False):
+                        st.code(msg["content"], language=None)
                     if msg["role"] == "user":
                         with btn_cols[1]:
                             if st.button("✏️ Edit", key=f"edit_{idx}",
@@ -656,6 +678,12 @@ def page_chat():
                                 else:
                                     _handle_graph_response(data, msg["content"])
                                 st.rerun()
+
+                    # Show refined query below user message if different from original
+                    if msg["role"] == "user":
+                        refined = msg.get("refined_query", "")
+                        if refined and refined.lower() != msg["content"].lower():
+                            st.caption(f"🔍 *Searched as:* {refined}")
 
     # ── Scroll anchor — auto-scrolls to bottom after new messages ──
     with chat_col:
@@ -734,7 +762,28 @@ def page_chat():
                               "open ticket", "log ticket", "submit ticket"]
             wants_ticket = any(p in user_input.lower() for p in ticket_phrases)
 
-        # ── Case 1: Waiting for ticket selection (multiple pending) ──
+        # ── Intercept ticket status change attempts ───────────────────────
+        status_phrases = ["mark as resolved", "mark resolved", "resolve ticket",
+                          "close ticket", "reopen ticket", "mark as open",
+                          "mark as in progress", "change status", "update status",
+                          "set status", "mark it as"]
+        if any(p in user_input.lower() for p in status_phrases):
+            last_ticket = st.session_state.rag_last_created_ticket
+            notion_url  = last_ticket.get("notion_url", "") if last_ticket else ""
+            st.session_state.rag_messages.append({
+                "role": "assistant",
+                "content": (
+                    "Ticket status can only be changed by your team directly in Notion — "
+                    "not from this chat.\n\n"
+                    "You can only update the **priority** (High / Medium / Low) from here.\n\n"
+                    + (f"[Open ticket in Notion ↗]({notion_url})" if notion_url else "")
+                ),
+                "sources": [],
+            })
+            _save_current_chat()
+            st.rerun()
+
+        # ── Case 1: Waiting for ticket selection ──────────────────────────
         if st.session_state.rag_awaiting_selection:
             selected_question = None
             stripped = user_input.strip()
@@ -864,15 +913,14 @@ def page_chat():
                         if update.get("priority"):
                             changes.append(f"Priority → **{update['priority']}**")
                             st.session_state.rag_last_created_ticket["priority"] = update["priority"]
-                        if update.get("status"):
-                            changes.append(f"Status → **{update['status']}**")
-                        short_id = ticket_id.split("-")[0] if ticket_id else ticket_id
+                        ticket_title = last_ticket.get("ticket_title", ticket_id)
                         st.session_state.rag_messages.append({
                             "role": "assistant",
                             "content": (
-                                f"✅ Ticket **`{short_id}...`** updated successfully!\n\n"
+                                f"✅ Ticket **`{ticket_title}`** updated successfully!\n\n"
                                 f"{chr(10).join(changes)}\n\n"
-                                f"[View ticket in Notion ↗]({notion_url})"
+                                f"[View ticket in Notion ↗]({notion_url})\n\n"
+                                f"_Note: Ticket status can only be changed by your team in Notion._"
                             ),
                             "sources": [],
                         })
@@ -885,6 +933,7 @@ def page_chat():
                     {"role": "assistant", "content": f"❌ Error: {err}", "sources": []})
             else:
                 _handle_graph_response(data, user_input)
+            _save_current_chat()
             st.rerun()
 
 
