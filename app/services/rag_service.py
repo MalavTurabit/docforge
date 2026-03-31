@@ -58,10 +58,18 @@ CITERAG_SYSTEM = (
     "respond with ONLY: 'I could not find this information in the available documents.' "
     "Do NOT mention what you did find. Do NOT speculate. Do NOT add anything else.\n"
     "6. Always cite sources using [1], [2] etc. inline for every factual claim.\n"
-    "7. NEVER combine partial or unrelated information from documents to imply an answer. "
+    "7. For scenario-based or hypothetical questions ('what if I resign tomorrow?', "
+    "'what happens if I miss the deadline?'), apply the relevant policy from the documents "
+    "to answer the scenario. This is expected and correct — do not refuse scenario questions "
+    "if the underlying policy exists in the documents.\n"
+    "8. NEVER combine partial or unrelated information from documents to imply an answer. "
     "Only answer if the EXACT information requested is explicitly present in the excerpts.\n"
-    "8. NEVER add a 'References:', 'Sources:', or bibliography section at the end of your "
-    "answer. The UI handles source display automatically. Only use inline citations like [1].\n\n"
+    "9. NEVER add a 'References:', 'Sources:', or bibliography section at the end of your "
+    "answer. The UI handles source display automatically. Only use inline citations like [1].\n"
+    "10. ALWAYS respond in the same language the user asked the question in. "
+    "If the user asks in Hindi, answer in Hindi. If in Gujarati, answer in Gujarati. "
+    "If in English, answer in English. Match the user's language exactly. "
+    "Only the inline citations like [1], [2] stay in their original form regardless of language.\n\n"
     "If asked anything outside company documents, respond: "
     "'I can only answer questions about company documents. "
     "Please ask about HR policies, security controls, compliance, contracts, or other company topics.'"
@@ -125,6 +133,15 @@ Use the conversation context above to understand vague or follow-up questions.
   even with vague language like "what about that", "like in a library",
   "the one we discussed" — use single_retrieval, NOT out_of_scope.
 
+- create_doc: User wants to create, generate, draft, or write a document. Examples:
+  * "create a document about the leave policy"
+  * "generate an HR policy document"
+  * "draft a contract for new employee"
+  * "make a report on compliance"
+  * "write a policy document"
+  * "I need to create a doc"
+  Use this whenever the user's intent is to CREATE or GENERATE a new document.
+
 - create_ticket: User explicitly wants to create or raise a support ticket.
 
 - single_retrieval: ANY question about the company or its documents, plus
@@ -138,7 +155,7 @@ Use the conversation context above to understand vague or follow-up questions.
 Latest user query: "{query}"
 
 Respond with JSON only:
-{{"path": "no_retrieval|out_of_scope|create_ticket|single_retrieval|multi_step|compare", "reasoning": "one line explanation", "doc_hint": "specific document name if mentioned or null"}}"""
+{{"path": "no_retrieval|out_of_scope|create_doc|create_ticket|single_retrieval|multi_step|compare", "reasoning": "one line explanation", "doc_hint": "specific document name if mentioned or null"}}"""
 
     raw = _chat([{"role": "user", "content": prompt}], temperature=0, max_tokens=150)
     try:
@@ -699,16 +716,14 @@ def judge_answer(query: str, answer: str, chunks: list[dict]) -> dict:
 Check if the answer is grounded in the provided document excerpts.
 
 RULES:
-1. Mark grounded=TRUE if every specific claim (names, numbers, dates, roles, addresses)
-   appears explicitly in at least one excerpt.
-2. It is FINE and CORRECT to combine information from multiple excerpts to form
-   a complete answer — this is expected behaviour, NOT a grounding violation.
-3. Mark grounded=FALSE ONLY if the answer contains specific facts that do NOT
-   appear in ANY of the excerpts (fabricated information).
-4. If the answer says "I could not find" but the info IS in the excerpts = FALSE.
-5. Minor wording differences are fine — look for semantic equivalence, not exact match.
-6. If most claims are grounded but one small detail is uncertain, still mark TRUE
-   and note the uncertainty in the reason.
+1. Mark grounded=TRUE if the key facts in the answer (names, numbers, dates, policies, rules)
+   are explicitly present in at least one excerpt.
+2. Combining information from multiple excerpts is CORRECT and expected — not a violation.
+3. Scenario-based or hypothetical answers ("if X happens, then Y") are grounded if the
+   underlying policy/rule Y is in the documents — even if the scenario X is not literally stated.
+4. Mark grounded=FALSE ONLY if specific facts appear that are NOT in ANY excerpt (fabrication).
+5. If the answer says "I could not find" but the info IS in excerpts = FALSE.
+6. When in doubt, mark TRUE — prefer false positives over false negatives.
 
 Document excerpts:
 {context}

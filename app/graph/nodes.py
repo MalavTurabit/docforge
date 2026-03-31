@@ -66,8 +66,15 @@ def intent_node(state: CiteRAGState) -> CiteRAGState:
         logger.error(f"[intent_node] classify_query failed: {e} — defaulting to single_retrieval")
         intent = "single_retrieval"
 
-    # For explicit ticket creation — extract topic and set confirm marker
-    if intent == "create_ticket":
+    # For explicit document creation — redirect to DocForge
+    if intent == "create_doc":
+        logger.info("[intent_node] create_doc detected — redirecting to DocForge")
+        return {
+            **state,
+            "intent": "create_doc",
+            "path":   "create_doc",
+            "error":  None,
+        }
         from app.services.rag_service import extract_ticket_topic
         topic = extract_ticket_topic(state["query"])
         return {
@@ -106,7 +113,7 @@ def retrieval_node(state: CiteRAGState) -> CiteRAGState:
     logger.info(f"[retrieval_node] intent={intent} query='{query[:60]}'")
 
     # Skip retrieval for these paths
-    if intent in ("no_retrieval", "out_of_scope", "create_ticket"):
+    if intent in ("no_retrieval", "out_of_scope", "create_ticket", "create_doc"):
         return {
             **state,
             "refined_query":      query,
@@ -266,6 +273,10 @@ def evidence_check_node(state: CiteRAGState) -> CiteRAGState:
     if intent == "create_ticket":
         return {**state, "can_answer": False, "grounded": True, "no_answer_reason": "explicit_ticket_request"}
 
+    # create_doc — redirect to DocForge
+    if intent == "create_doc":
+        return {**state, "can_answer": True, "grounded": True, "no_answer_reason": None}
+
     # ── Compare path — check both chunk sets ─────────────────────────────────
     if intent == "compare":
         chunks_a = state.get("chunks_a", [])
@@ -366,29 +377,35 @@ def answer_node(state: CiteRAGState) -> CiteRAGState:
     intent = state.get("intent", "single_retrieval")
     logger.info(f"[answer_node] intent={intent}")
 
-    # ── No retrieval — memory/greeting response ───────────────────────────────
+    # ── Create doc — redirect to DocForge ────────────────────────────────────
+    if intent == "create_doc":
+        answer = (
+            "It looks like you want to **create a document**! 📄\n\n"
+            "CiteRAG is for answering questions about existing documents. "
+            "For creating new documents, please use **DocForge** — "
+            "our AI document generation tool.\n\n"
+            "[👉 Go to DocForge](http://localhost:8501)"
+        )
+        return {**state, "answer": answer, "sources": [], "ragas_scores": None}
+
+    # ── No retrieval — greeting/memory response ───────────────────────────────
     if intent == "no_retrieval":
         from app.services.rag_service import _chat
-
-        # Extract first_message and summary from chat_history system message
         chat_history = state.get("chat_history", [])
         sys_content  = next((m["content"] for m in chat_history if m.get("role") == "system"), "")
-
         system = (
             "You are CiteRAG, a helpful document Q&A assistant for company documents. "
             "Respond warmly to greetings and questions about what you can do. "
             "For questions about the conversation history, answer ONLY from the context provided — "
-            "do NOT guess or fabricate. Keep responses short and friendly.\n\n"
+            "do NOT guess or fabricate. Keep responses short and friendly. "
+            "ALWAYS respond in the same language the user used. "
+            "If they write in Hindi, reply in Hindi. If Gujarati, reply in Gujarati.\n\n"
             + (f"Conversation context:\n{sys_content}" if sys_content else "")
         )
-
         messages = [{"role": "system", "content": system}]
-
-        # Add recent raw messages from history
         for msg in chat_history[-6:]:
             if msg.get("role") in ("user", "assistant") and msg.get("content", "").strip():
                 messages.append({"role": msg["role"], "content": msg["content"]})
-
         messages.append({"role": "user", "content": state["query"]})
         answer = _chat(messages)
         return {**state, "answer": answer, "sources": [], "ragas_scores": None}

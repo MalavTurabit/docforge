@@ -308,6 +308,7 @@ def render_sidebar():
             st.session_state.rag_awaiting_selection  = False
             st.session_state.rag_last_created_ticket = None
             st.session_state.rag_current_chat_id     = None
+            st.session_state["_last_streamed_idx"]   = -1
             import uuid
             st.session_state.rag_session_id = str(uuid.uuid4())
             st.rerun()
@@ -645,7 +646,29 @@ def page_chat():
                                 st.session_state.rag_editing_idx = None
                                 st.rerun()
                     else:
-                        st.markdown(msg["content"])
+                        # Stream the latest assistant message, render others normally
+                        is_latest = (msg["role"] == "assistant" and idx == len(messages) - 1)
+                        already_streamed = st.session_state.get("_last_streamed_idx") == idx
+
+                        if is_latest and not already_streamed:
+                            def _stream_text(text):
+                                import time
+                                for word in text.split(" "):
+                                    yield word + " "
+                                    time.sleep(0.012)
+                            st.write_stream(_stream_text(msg["content"]))
+                            st.session_state["_last_streamed_idx"] = idx
+                        else:
+                            st.markdown(msg["content"])
+
+                        # Auto-open DocForge for create_doc path
+                        if msg.get("path") == "create_doc":
+                            import streamlit.components.v1 as components
+                            components.html("""
+                                <script>
+                                    window.open('http://localhost:8501', '_blank');
+                                </script>
+                            """, height=0)
 
                 _render_message_sources(msg)
 
@@ -785,6 +808,30 @@ def page_chat():
 
         # ── Case 1: Waiting for ticket selection ──────────────────────────
         if st.session_state.rag_awaiting_selection:
+
+            # Detect cancel intent first — user doesn't want to create a ticket
+            user_lower = user_input.strip().lower()
+            cancel_phrases = ["no", "nope", "cancel", "nevermind", "never mind",
+                              "don't want", "dont want", "not now", "skip",
+                              "forget it", "forget", "no thanks", "nah", "stop",
+                              "exit", "hello", "hi", "no i don't", "no i dont",
+                              "not create", "i don't want", "i dont want"]
+            is_cancel = (
+                user_lower in cancel_phrases or
+                any(phrase in user_lower for phrase in
+                    ["don't want", "dont want", "no i", "not create",
+                     "cancel", "don't need", "dont need"])
+            )
+            if is_cancel:
+                st.session_state.rag_awaiting_selection = False
+                st.session_state.rag_messages.append({
+                    "role": "assistant",
+                    "content": "No problem! Your pending questions are saved if you change your mind later. What else can I help you with?",
+                    "sources": [],
+                })
+                _save_current_chat()
+                st.rerun()
+
             selected_question = None
             stripped = user_input.strip()
 

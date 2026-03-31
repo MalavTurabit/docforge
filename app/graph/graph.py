@@ -196,11 +196,23 @@ def run_graph(
         "ticket_id":           None,
         "ticket_title":        None,
         "ticket_status":       None,
+        "path":                "",
         "error":               None,
     }
 
     logger.info(f"[run_graph] START query='{query[:80]}'")
-    final_state = citerag_graph.invoke(initial_state)
+
+    from langchain_core.runnables import RunnableConfig
+    config = RunnableConfig(
+        run_name = "CiteRAG-Graph",
+        metadata = {
+            "query":      query[:80],
+            "session_id": session_id or "no-session",
+            "industry":   industry or "all",
+        },
+        tags = ["citerag", "production"],
+    )
+    final_state = citerag_graph.invoke(initial_state, config=config)
 
     # ── Save memory back to Redis ─────────────────────────────────────────────
     if session_id and memory is not None:
